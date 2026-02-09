@@ -13,9 +13,11 @@ final class Database: Sendable {
         let dbPath = dbDir.appendingPathComponent("disksight.sqlite").path
 
         var config = Configuration()
+        #if DEBUG
         config.prepareDatabase { db in
             db.trace { print("SQL: \($0)") }
         }
+        #endif
 
         dbPool = try! DatabasePool(path: dbPath, configuration: config)
         try! migrator.migrate(dbPool)

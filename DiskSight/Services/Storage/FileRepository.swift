@@ -311,4 +311,17 @@ actor FileRepository {
             try db.execute(sql: "UPDATE scan_sessions SET last_fsevents_id = ? WHERE id = ?", arguments: [eventId, sessionId])
         }
     }
+
+    // MARK: - Search
+
+    func searchFiles(query: String, limit: Int = 100) throws -> [FileNode] {
+        let pattern = "%\(query)%"
+        return try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("name").like(pattern))
+                .order(Column("size").desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
 }
