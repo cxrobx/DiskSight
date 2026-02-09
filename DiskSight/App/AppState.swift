@@ -54,7 +54,7 @@ final class AppState: ObservableObject {
 
     private var scanTask: Task<Void, Never>?
     private let database: Database
-    private let fileRepository: FileRepository
+    let fileRepository: FileRepository
 
     init() {
         self.database = Database.shared

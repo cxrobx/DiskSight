@@ -118,4 +118,48 @@ actor FileRepository {
                 """)
         }
     }
+
+    // MARK: - Visualization Queries
+
+    func rootNode() throws -> FileNode? {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("parent_path") == nil)
+                .fetchOne(db)
+        }
+    }
+
+    func childrenWithSizes(ofPath path: String) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("parent_path") == path)
+                .filter(Column("size") > 0)
+                .order(Column("size").desc)
+                .fetchAll(db)
+        }
+    }
+
+    func largestFiles(limit: Int = 20) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("is_directory") == false)
+                .order(Column("size").desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    func fileTypeDistribution() throws -> [(String, Int64)] {
+        try database.dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT file_type, SUM(size) as total_size
+                FROM files
+                WHERE is_directory = 0 AND file_type IS NOT NULL
+                GROUP BY file_type
+                ORDER BY total_size DESC
+                LIMIT 10
+                """)
+            return rows.map { ($0["file_type"] as String? ?? "unknown", $0["total_size"] as Int64? ?? 0) }
+        }
+    }
 }

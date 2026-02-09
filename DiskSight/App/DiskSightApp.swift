@@ -26,8 +26,7 @@ struct ContentView: View {
             case .overview:
                 OverviewView()
             case .visualization:
-                Text("Visualization")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VisualizationContainer()
             case .duplicates:
                 Text("Duplicates")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -1,0 +1,136 @@
+import SwiftUI
+
+struct TreemapView: View {
+    let nodes: [FileNode]
+    let onDrillDown: (FileNode) -> Void
+
+    @State private var hoveredId: String?
+    @State private var tooltipNode: FileNode?
+    @State private var tooltipPosition: CGPoint = .zero
+
+    var body: some View {
+        GeometryReader { geometry in
+            let rects = TreemapAlgorithm.layout(
+                nodes: nodes,
+                in: CGRect(origin: .zero, size: geometry.size)
+            )
+
+            ZStack(alignment: .topLeading) {
+                Canvas { context, size in
+                    for item in rects {
+                        let insetRect = item.rect.insetBy(dx: 1, dy: 1)
+                        guard insetRect.width > 0, insetRect.height > 0 else { continue }
+
+                        let isHovered = item.id == hoveredId
+                        let color = item.color
+                        let brightness = isHovered ? 0.15 : 0.0
+
+                        let fillColor = Color(
+                            red: min(color.r + brightness, 1.0),
+                            green: min(color.g + brightness, 1.0),
+                            blue: min(color.b + brightness, 1.0)
+                        )
+
+                        let path = RoundedRectangle(cornerRadius: 2)
+                            .path(in: insetRect)
+
+                        context.fill(path, with: .color(fillColor))
+
+                        // Border
+                        context.stroke(path, with: .color(.black.opacity(0.3)), lineWidth: 0.5)
+
+                        // Label if rect is large enough
+                        if insetRect.width > 50 && insetRect.height > 20 {
+                            let label = item.node.name
+                            let sizeLabel = SizeFormatter.format(item.node.size)
+                            let text = context.resolve(Text("\(label)\n\(sizeLabel)")
+                                .font(.system(size: min(11, insetRect.height / 3)))
+                                .foregroundStyle(.white))
+
+                            let textRect = CGRect(
+                                x: insetRect.minX + 4,
+                                y: insetRect.minY + 2,
+                                width: insetRect.width - 8,
+                                height: insetRect.height - 4
+                            )
+                            context.draw(text, in: textRect)
+                        }
+                    }
+                }
+
+                // Invisible overlay for hit testing
+                ForEach(rects) { item in
+                    Rectangle()
+                        .fill(.clear)
+                        .frame(width: item.rect.width, height: item.rect.height)
+                        .position(x: item.rect.midX, y: item.rect.midY)
+                        .onHover { isHovering in
+                            hoveredId = isHovering ? item.id : nil
+                            if isHovering {
+                                tooltipNode = item.node
+                                tooltipPosition = CGPoint(x: item.rect.midX, y: item.rect.minY - 10)
+                            } else if hoveredId == nil {
+                                tooltipNode = nil
+                            }
+                        }
+                        .onTapGesture {
+                            if item.node.isDirectory {
+                                onDrillDown(item.node)
+                            }
+                        }
+                        .cursor(item.node.isDirectory ? .pointingHand : .arrow)
+                }
+
+                // Tooltip
+                if let node = tooltipNode {
+                    TooltipView(node: node)
+                        .position(x: min(max(tooltipPosition.x, 100), geometry.size.width - 100),
+                                  y: max(tooltipPosition.y, 40))
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                        .animation(.easeInOut(duration: 0.15), value: tooltipNode?.path)
+                }
+            }
+        }
+    }
+}
+
+private struct TooltipView: View {
+    let node: FileNode
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(node.name)
+                .font(.caption.bold())
+                .foregroundStyle(.primary)
+            Text(SizeFormatter.format(node.size))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if let modified = node.modifiedAt {
+                Text("Modified: \(Date(timeIntervalSince1970: modified).relativeString)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            if node.isDirectory {
+                Text("Click to explore")
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+            }
+        }
+        .padding(8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .shadow(radius: 4)
+    }
+}
+
+extension View {
+    func cursor(_ cursor: NSCursor) -> some View {
+        onHover { inside in
+            if inside {
+                cursor.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+}
