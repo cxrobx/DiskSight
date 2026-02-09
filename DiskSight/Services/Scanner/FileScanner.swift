@@ -30,7 +30,7 @@ struct FileScanner {
                     guard let enumerator = FileManager.default.enumerator(
                         at: rootURL,
                         includingPropertiesForKeys: Array(resourceKeys),
-                        options: [.skipsHiddenFiles]
+                        options: []
                     ) else {
                         continuation.finish()
                         return
@@ -50,7 +50,9 @@ struct FileScanner {
                     for case let fileURL as URL in enumerator {
                         if Task.isCancelled { break }
 
-                        let values = try fileURL.resourceValues(forKeys: resourceKeys)
+                        guard let values = try? fileURL.resourceValues(forKeys: resourceKeys) else {
+                            continue // Skip files we can't read
+                        }
                         let isDir = values.isDirectory ?? false
                         let size = Int64(values.fileSize ?? 0)
 
@@ -92,6 +94,7 @@ struct FileScanner {
                     continuation.yield(progress)
                     continuation.finish()
                 } catch {
+                    print("FileScanner error: \(error)")
                     continuation.finish()
                 }
             }

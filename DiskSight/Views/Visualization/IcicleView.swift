@@ -7,6 +7,7 @@ struct IcicleView: View {
     @State private var hoveredPath: String?
     @State private var tooltipNode: FileNode?
     @State private var tooltipPosition: CGPoint = .zero
+    @State private var currentRects: [IcicleRect] = []
 
     var body: some View {
         GeometryReader { geometry in
@@ -15,97 +16,85 @@ struct IcicleView: View {
                 in: CGRect(origin: .zero, size: geometry.size)
             )
 
-            ZStack(alignment: .topLeading) {
-                Canvas { context, size in
-                    for item in rects {
-                        let insetRect = item.rect.insetBy(dx: 0.5, dy: 0.5)
-                        guard insetRect.width > 0, insetRect.height > 0 else { continue }
+            Canvas { context, size in
+                for item in rects {
+                    let insetRect = item.rect.insetBy(dx: 0.5, dy: 0.5)
+                    guard insetRect.width > 0, insetRect.height > 0 else { continue }
 
-                        let isHovered = item.node.path == hoveredPath
-                        let color = TreemapColor.forFileType(item.node.fileType)
-                        let brightness = isHovered ? 0.15 : 0.0
+                    let isHovered = item.node.path == hoveredPath
+                    let color = TreemapColor.forNode(item.node)
+                    let brightness = isHovered ? 0.15 : 0.0
 
-                        let fillColor = Color(
-                            red: min(color.r + brightness, 1.0),
-                            green: min(color.g + brightness, 1.0),
-                            blue: min(color.b + brightness, 1.0)
+                    let fillColor = Color(
+                        red: min(color.r + brightness, 1.0),
+                        green: min(color.g + brightness, 1.0),
+                        blue: min(color.b + brightness, 1.0)
+                    )
+
+                    let path = Rectangle().path(in: insetRect)
+                    context.fill(path, with: .color(fillColor))
+                    context.stroke(path, with: .color(.black.opacity(0.2)), lineWidth: 0.5)
+
+                    // Label
+                    if insetRect.width > 40 && insetRect.height > 16 {
+                        let label = item.node.name
+                        let text = context.resolve(Text(label)
+                            .font(.system(size: min(11, insetRect.height - 4)))
+                            .foregroundStyle(.white))
+
+                        let textRect = CGRect(
+                            x: insetRect.minX + 4,
+                            y: insetRect.minY + 2,
+                            width: insetRect.width - 8,
+                            height: insetRect.height - 4
                         )
-
-                        let path = Rectangle().path(in: insetRect)
-                        context.fill(path, with: .color(fillColor))
-                        context.stroke(path, with: .color(.black.opacity(0.2)), lineWidth: 0.5)
-
-                        // Label
-                        if insetRect.width > 40 && insetRect.height > 16 {
-                            let label = item.node.name
-                            let text = context.resolve(Text(label)
-                                .font(.system(size: min(11, insetRect.height - 4)))
-                                .foregroundStyle(.white))
-
-                            let textRect = CGRect(
-                                x: insetRect.minX + 4,
-                                y: insetRect.minY + 2,
-                                width: insetRect.width - 8,
-                                height: insetRect.height - 4
-                            )
-                            context.draw(text, in: textRect)
-                        }
+                        context.draw(text, in: textRect)
                     }
                 }
-
-                // Hit testing
-                ForEach(rects) { item in
-                    Rectangle()
-                        .fill(.clear)
-                        .frame(width: item.rect.width, height: item.rect.height)
-                        .position(x: item.rect.midX, y: item.rect.midY)
-                        .onHover { isHovering in
-                            hoveredPath = isHovering ? item.node.path : nil
-                            if isHovering {
-                                tooltipNode = item.node
-                                tooltipPosition = CGPoint(x: item.rect.midX, y: item.rect.minY - 10)
-                            } else if hoveredPath == nil {
-                                tooltipNode = nil
-                            }
-                        }
-                        .onTapGesture {
-                            if item.node.isDirectory {
-                                onDrillDown(item.node)
-                            }
-                        }
+            }
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    if let hit = currentRects.first(where: { $0.rect.contains(location) }) {
+                        hoveredPath = hit.node.path
+                        tooltipNode = hit.node
+                        tooltipPosition = CGPoint(x: location.x + 15, y: location.y - 10)
+                    } else {
+                        hoveredPath = nil
+                        tooltipNode = nil
+                    }
+                case .ended:
+                    hoveredPath = nil
+                    tooltipNode = nil
                 }
-
-                // Tooltip
+            }
+            .gesture(SpatialTapGesture().onEnded { value in
+                if let hit = currentRects.first(where: { $0.rect.contains(value.location) }),
+                   hit.node.isDirectory {
+                    onDrillDown(hit.node)
+                }
+            })
+            .contextMenu {
                 if let node = tooltipNode {
-                    IcicleTooltip(node: node)
-                        .position(x: min(max(tooltipPosition.x, 100), geometry.size.width - 100),
-                                  y: max(tooltipPosition.y, 30))
+                    VisualizationContextMenu(node: node)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if let node = tooltipNode {
+                    VisualizationTooltip(node: node)
+                        .fixedSize()
+                        .position(x: min(max(tooltipPosition.x + 70, 150), geometry.size.width - 150),
+                                  y: min(max(tooltipPosition.y - 60, 60), geometry.size.height - 80))
                         .allowsHitTesting(false)
                 }
             }
-        }
-    }
-}
-
-private struct IcicleTooltip: View {
-    let node: FileNode
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(node.name)
-                .font(.caption.bold())
-            Text(SizeFormatter.format(node.size))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            if node.isDirectory {
-                Text("Click to explore")
-                    .font(.caption2)
-                    .foregroundStyle(.blue)
+            .onChange(of: nodes.count) {
+                currentRects = rects
+            }
+            .onAppear {
+                currentRects = rects
             }
         }
-        .padding(8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .shadow(radius: 4)
     }
 }
 

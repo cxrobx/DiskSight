@@ -7,11 +7,40 @@ struct TreemapRect: Identifiable {
     let depth: Int
 
     var color: (r: Double, g: Double, b: Double) {
-        TreemapColor.forFileType(node.fileType)
+        TreemapColor.forNode(node)
     }
 }
 
 enum TreemapColor {
+    /// Distinct palette for directories — each gets a unique color based on name hash
+    private static let directoryPalette: [(r: Double, g: Double, b: Double)] = [
+        (0.35, 0.58, 0.87),  // blue
+        (0.30, 0.72, 0.49),  // green
+        (0.82, 0.45, 0.45),  // red
+        (0.60, 0.45, 0.82),  // purple
+        (0.90, 0.62, 0.25),  // orange
+        (0.25, 0.72, 0.72),  // teal
+        (0.80, 0.55, 0.70),  // pink
+        (0.55, 0.70, 0.35),  // lime
+        (0.72, 0.58, 0.35),  // brown
+        (0.45, 0.60, 0.72),  // steel
+        (0.75, 0.42, 0.60),  // magenta
+        (0.40, 0.68, 0.60),  // sage
+    ]
+
+    static func forNode(_ node: FileNode) -> (r: Double, g: Double, b: Double) {
+        if node.isDirectory {
+            return forDirectory(name: node.name)
+        }
+        return forFileType(node.fileType)
+    }
+
+    static func forDirectory(name: String) -> (r: Double, g: Double, b: Double) {
+        let hash = name.utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
+        let index = abs(hash) % directoryPalette.count
+        return directoryPalette[index]
+    }
+
     static func forFileType(_ type: String?) -> (r: Double, g: Double, b: Double) {
         guard let type = type?.lowercased() else { return (0.5, 0.5, 0.5) }
 
@@ -27,8 +56,6 @@ enum TreemapColor {
             return (0.85, 0.35, 0.35) // red
         } else if type.contains("source") || type.contains("swift") || type.contains("json") || type.contains("xml") {
             return (0.25, 0.75, 0.75) // teal
-        } else if type.contains("folder") || type.contains("directory") {
-            return (0.50, 0.50, 0.60) // gray-blue
         } else if type.contains("executable") || type.contains("application") {
             return (0.75, 0.55, 0.35) // brown
         }

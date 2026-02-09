@@ -81,12 +81,16 @@ final class AppState: ObservableObject {
             do {
                 let scanner = FileScanner(repository: fileRepository)
                 let session = try await fileRepository.createScanSession(rootPath: url.path)
+                guard let sessionId = session.id else {
+                    self.scanState = .error("Failed to create scan session")
+                    return
+                }
 
-                for await progress in scanner.scan(rootURL: url, sessionId: session.id!) {
+                for await progress in scanner.scan(rootURL: url, sessionId: sessionId) {
                     self.scanState = .scanning(progress: progress)
                 }
 
-                try await fileRepository.completeScanSession(id: session.id!)
+                try await fileRepository.completeScanSession(id: sessionId)
                 self.lastScanSession = try await fileRepository.latestScanSession()
                 self.scanState = .completed
 
@@ -137,10 +141,10 @@ final class AppState: ObservableObject {
 
     func stopMonitoring() {
         // Save current event ID before stopping
-        if let monitor = fsMonitor, let session = lastScanSession {
+        if let monitor = fsMonitor, let session = lastScanSession, let sessionId = session.id {
             let eventId = monitor.currentEventId
             Task {
-                try? await fileRepository.updateEventId(sessionId: session.id!, eventId: Int64(eventId))
+                try? await fileRepository.updateEventId(sessionId: sessionId, eventId: Int64(eventId))
             }
         }
 
@@ -155,9 +159,10 @@ final class AppState: ObservableObject {
             self.lastScanSession = try? await fileRepository.latestScanSession()
             if let session = lastScanSession {
                 self.scanRootPath = URL(fileURLWithPath: session.rootPath)
-                self.scanState = .completed
-                // Auto-start monitoring
-                startMonitoring(path: session.rootPath)
+                if session.completedAt != nil {
+                    self.scanState = .completed
+                    startMonitoring(path: session.rootPath)
+                }
             }
         }
     }

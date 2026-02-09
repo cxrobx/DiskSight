@@ -1,6 +1,6 @@
 # DiskSight
 
-## Current Phase: COMPLETE (All 7 phases done)
+## Current Phase: COMPLETE (All 7 phases + post-launch fixes)
 
 ## Architecture
 - **Pattern:** MVVM with SwiftUI
@@ -63,6 +63,19 @@
 - FileRowView with type-specific icons
 - SQL tracing gated behind #if DEBUG
 - Code signing entitlements configured
+
+### Post-Launch Fixes
+- **Session ID crash fix** — `ScanSession.id` was nil after GRDB 7.x insert; added `db.lastInsertedRowID` fallback in `createScanSession`, removed all force unwraps in AppState
+- **Scanner resilience** — Per-file `try?` on `resourceValues` so one unreadable file doesn't abort the entire scan; error logging in catch block
+- **Session state fix** — `loadLastSession` only shows "Scan Complete" when `completedAt` is non-nil
+- **Recursive directory sizes** — `calculateDirectorySizes` now uses multi-pass bottom-up propagation (up to 30 passes) instead of single-pass immediate-children-only sum
+- **Hover hit testing** — Replaced broken `ForEach` + `.position()` overlay with `onContinuousHover` + manual rect/arc containment checks on all 3 visualization views
+- **Click hit testing** — Uses `SpatialTapGesture` with coordinate-based hit testing for drill-down
+- **Directory color palette** — 12 distinct colors for directories based on name hash; files still use type-based coloring
+- **Hidden files scanning** — Removed `.skipsHiddenFiles` to capture ~450GB of previously invisible data (dotfiles, /private, caches)
+- **Mouse-following tooltips** — Tooltip tracks cursor position with offset, dark background (black 85% opacity) with white text for high contrast
+- **Right-click context menu** — "Copy Path" (clipboard) and "Show in Finder" on all visualization views
+- **Shared tooltip/menu** — `VisualizationTooltip` and `VisualizationContextMenu` shared across Treemap, Icicle, Sunburst
 
 ## Key Types
 - `FileNode` — GRDB record for file metadata

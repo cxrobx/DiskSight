@@ -17,6 +17,10 @@ actor FileRepository {
                 startedAt: Date().timeIntervalSince1970
             )
             try session.insert(db)
+            // Ensure id is set even if didInsert callback didn't fire
+            if session.id == nil {
+                session.id = db.lastInsertedRowID
+            }
             return session
         }
     }
@@ -109,6 +113,12 @@ actor FileRepository {
 
     func calculateDirectorySizes() throws {
         try database.dbPool.write { db in
+            // Multi-pass bottom-up propagation:
+            // Pass 1: each directory = sum of immediate file children
+            // Pass 2+: each directory = sum of ALL immediate children (files + subdirs)
+            // Repeat until sizes stabilize (propagates from leaves to root)
+
+            // First pass: sum only immediate file children
             try db.execute(sql: """
                 UPDATE files SET size = (
                     SELECT COALESCE(SUM(f2.size), 0)
@@ -116,6 +126,25 @@ actor FileRepository {
                     WHERE f2.parent_path = files.path AND f2.is_directory = 0
                 ) WHERE is_directory = 1
                 """)
+
+            // Subsequent passes: sum ALL immediate children (files + dirs with updated sizes)
+            // Each pass propagates sizes up one level
+            var previousRootSize: Int64 = -1
+            for _ in 0..<30 { // max 30 levels deep
+                let rootSize = try Int64.fetchOne(db, sql: """
+                    SELECT COALESCE(SUM(size), 0) FROM files WHERE parent_path IS NULL
+                    """) ?? 0
+                if rootSize == previousRootSize { break }
+                previousRootSize = rootSize
+
+                try db.execute(sql: """
+                    UPDATE files SET size = (
+                        SELECT COALESCE(SUM(f2.size), 0)
+                        FROM files f2
+                        WHERE f2.parent_path = files.path
+                    ) WHERE is_directory = 1
+                    """)
+            }
         }
     }
 
