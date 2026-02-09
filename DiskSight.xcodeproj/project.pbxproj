@@ -34,6 +34,7 @@
 		DD44EE55FF66AA77BB880004 /* CacheDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD44EE55FF66AA77BB880003 /* CacheDetector.swift */; };
 		DD44EE55FF66AA77BB880006 /* StaleFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD44EE55FF66AA77BB880005 /* StaleFilesView.swift */; };
 		DD44EE55FF66AA77BB880009 /* CacheView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD44EE55FF66AA77BB880008 /* CacheView.swift */; };
+		EE55FF66AA77BB88CC990002 /* FSEventsMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE55FF66AA77BB88CC990001 /* FSEventsMonitor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -64,6 +65,7 @@
 		DD44EE55FF66AA77BB880003 /* CacheDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheDetector.swift; sourceTree = "<group>"; };
 		DD44EE55FF66AA77BB880005 /* StaleFilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaleFilesView.swift; sourceTree = "<group>"; };
 		DD44EE55FF66AA77BB880008 /* CacheView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheView.swift; sourceTree = "<group>"; };
+		EE55FF66AA77BB88CC990001 /* FSEventsMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FSEventsMonitor.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -135,6 +137,7 @@
 				A88B98A916016A74BB50C6B8 /* Storage */,
 				CC33DD44EE55FF66AA770003 /* Hashing */,
 				CC33DD44EE55FF66AA770006 /* Analysis */,
+				EE55FF66AA77BB88CC990003 /* Monitor */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -264,6 +267,14 @@
 			path = Cache;
 			sourceTree = "<group>";
 		};
+		EE55FF66AA77BB88CC990003 /* Monitor */ = {
+			isa = PBXGroup;
+			children = (
+				EE55FF66AA77BB88CC990001 /* FSEventsMonitor.swift */,
+			);
+			path = Monitor;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -355,6 +366,7 @@
 				DD44EE55FF66AA77BB880004 /* CacheDetector.swift in Sources */,
 				DD44EE55FF66AA77BB880006 /* StaleFilesView.swift in Sources */,
 				DD44EE55FF66AA77BB880009 /* CacheView.swift in Sources */,
+				EE55FF66AA77BB88CC990002 /* FSEventsMonitor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

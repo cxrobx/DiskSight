@@ -51,15 +51,20 @@ final class AppState: ObservableObject {
     @Published var scanRootPath: URL?
     @Published var lastScanSession: ScanSession?
     @Published var hasFullDiskAccess: Bool = false
+    @Published var isMonitoring: Bool = false
+    @Published var recentEvents: [FSEventInfo] = []
 
     private var scanTask: Task<Void, Never>?
     private let database: Database
     let fileRepository: FileRepository
+    private var fsMonitor: FSEventsMonitor?
+    private var eventCancellable: AnyCancellable?
 
     init() {
         self.database = Database.shared
         self.fileRepository = FileRepository(database: database)
         checkFullDiskAccess()
+        loadLastSession()
     }
 
     func checkFullDiskAccess() {
@@ -69,6 +74,7 @@ final class AppState: ObservableObject {
 
     func startScan(at url: URL) {
         scanTask?.cancel()
+        stopMonitoring()
         scanState = .scanning(progress: ScanProgress())
 
         scanTask = Task {
@@ -83,6 +89,9 @@ final class AppState: ObservableObject {
                 try await fileRepository.completeScanSession(id: session.id!)
                 self.lastScanSession = try await fileRepository.latestScanSession()
                 self.scanState = .completed
+
+                // Start monitoring after scan completes
+                startMonitoring(path: url.path)
             } catch {
                 if !Task.isCancelled {
                     self.scanState = .error(error.localizedDescription)
@@ -94,5 +103,62 @@ final class AppState: ObservableObject {
     func cancelScan() {
         scanTask?.cancel()
         scanState = .idle
+    }
+
+    // MARK: - FSEvents Monitoring
+
+    func startMonitoring(path: String) {
+        stopMonitoring()
+
+        let monitor = FSEventsMonitor(repository: fileRepository)
+        self.fsMonitor = monitor
+
+        // Subscribe to events for UI updates
+        eventCancellable = monitor.eventSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                self?.recentEvents.insert(event, at: 0)
+                if (self?.recentEvents.count ?? 0) > 50 {
+                    self?.recentEvents = Array(self?.recentEvents.prefix(50) ?? [])
+                }
+            }
+
+        // Resume from last event ID if available
+        let sinceId: UInt64
+        if let lastId = lastScanSession?.lastFseventsId {
+            sinceId = UInt64(lastId)
+        } else {
+            sinceId = UInt64(kFSEventStreamEventIdSinceNow)
+        }
+
+        monitor.start(path: path, sinceEventId: sinceId)
+        isMonitoring = true
+    }
+
+    func stopMonitoring() {
+        // Save current event ID before stopping
+        if let monitor = fsMonitor, let session = lastScanSession {
+            let eventId = monitor.currentEventId
+            Task {
+                try? await fileRepository.updateEventId(sessionId: session.id!, eventId: Int64(eventId))
+            }
+        }
+
+        fsMonitor?.stop()
+        fsMonitor = nil
+        eventCancellable = nil
+        isMonitoring = false
+    }
+
+    private func loadLastSession() {
+        Task {
+            self.lastScanSession = try? await fileRepository.latestScanSession()
+            if let session = lastScanSession {
+                self.scanRootPath = URL(fileURLWithPath: session.rootPath)
+                self.scanState = .completed
+                // Auto-start monitoring
+                startMonitoring(path: session.rootPath)
+            }
+        }
     }
 }

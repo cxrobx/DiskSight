@@ -303,4 +303,12 @@ actor FileRepository {
             return (paths, totalSize)
         }
     }
+
+    // MARK: - FSEvents
+
+    func updateEventId(sessionId: Int64, eventId: Int64) throws {
+        try database.dbPool.write { db in
+            try db.execute(sql: "UPDATE scan_sessions SET last_fsevents_id = ? WHERE id = ?", arguments: [eventId, sessionId])
+        }
+    }
 }
