@@ -2,12 +2,13 @@ import SwiftUI
 
 struct DuplicatesView: View {
     @EnvironmentObject var appState: AppState
-    @State private var duplicateGroups: [DuplicateGroup] = []
     @State private var isScanning = false
     @State private var progress: DuplicateProgress?
     @State private var scanTask: Task<Void, Never>?
     @State private var showConfirmTrash = false
     @State private var filesToTrash: [FileNode] = []
+
+    private var duplicateGroups: [DuplicateGroup] { appState.duplicateGroups ?? [] }
 
     var totalReclaimable: Int64 {
         duplicateGroups.reduce(0) { $0 + $1.reclaimableSize }
@@ -166,7 +167,7 @@ struct DuplicatesView: View {
             }
 
             do {
-                self.duplicateGroups = try await finder.getDuplicateGroups()
+                appState.duplicateGroups = try await finder.getDuplicateGroups()
             } catch {}
             self.isScanning = false
         }
@@ -182,8 +183,9 @@ struct DuplicatesView: View {
                 } catch {}
             }
 
+            appState.invalidateCache()
             let finder = DuplicateFinder(repository: appState.fileRepository)
-            duplicateGroups = (try? await finder.getDuplicateGroups()) ?? []
+            appState.duplicateGroups = (try? await finder.getDuplicateGroups()) ?? []
         }
     }
 }

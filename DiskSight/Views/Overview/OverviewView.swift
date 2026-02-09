@@ -3,9 +3,10 @@ import SwiftUI
 struct OverviewView: View {
     @EnvironmentObject var appState: AppState
     @State private var diskInfo: DiskInfo?
-    @State private var topFolders: [FileNode] = []
-    @State private var fileCount: Int = 0
-    @State private var totalIndexedSize: Int64 = 0
+
+    private var topFolders: [FileNode] { appState.overviewTopFolders ?? [] }
+    private var fileCount: Int { appState.overviewFileCount ?? 0 }
+    private var totalIndexedSize: Int64 { appState.overviewTotalSize ?? 0 }
 
     var body: some View {
         ScrollView {
@@ -35,11 +36,12 @@ struct OverviewView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
             loadDiskInfo()
-            await loadScanData()
+            await appState.loadOverviewData()
         }
         .onChange(of: appState.scanState) {
             if appState.scanState == .completed {
-                Task { await loadScanData() }
+                appState.invalidateCache()
+                Task { await appState.loadOverviewData() }
             }
         }
     }
@@ -179,6 +181,20 @@ struct OverviewView: View {
                 quickActionButton(icon: "square.grid.3x3.fill", label: "Visualize", section: .visualization)
                 quickActionButton(icon: "doc.on.doc", label: "Find Duplicates", section: .duplicates)
                 quickActionButton(icon: "internaldrive", label: "Clean Caches", section: .cache)
+
+                Button {
+                    appState.exportCSV()
+                } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.title2)
+                        Text("Export CSV")
+                            .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
             }
             .padding(8)
         }
@@ -277,21 +293,6 @@ struct OverviewView: View {
         }
     }
 
-    private func loadScanData() async {
-        do {
-            fileCount = try await appState.fileRepository.fileCount()
-            totalIndexedSize = try await appState.fileRepository.totalSize()
-            if let root = try await appState.fileRepository.rootNode() {
-                topFolders = try await appState.fileRepository.childrenWithSizes(ofPath: root.path)
-                    .filter { $0.isDirectory }
-                    .prefix(10)
-                    .map { $0 }
-            }
-            if appState.lastScanSession == nil {
-                appState.lastScanSession = try await appState.fileRepository.latestScanSession()
-            }
-        } catch {}
-    }
 }
 
 struct DiskInfo {

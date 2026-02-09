@@ -4,6 +4,7 @@ struct IcicleView: View {
     let nodes: [FileNode]
     let onDrillDown: (FileNode) -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var hoveredPath: String?
     @State private var tooltipNode: FileNode?
     @State private var tooltipPosition: CGPoint = .zero
@@ -33,7 +34,8 @@ struct IcicleView: View {
 
                     let path = Rectangle().path(in: insetRect)
                     context.fill(path, with: .color(fillColor))
-                    context.stroke(path, with: .color(.black.opacity(0.2)), lineWidth: 0.5)
+                    let strokeColor: Color = colorScheme == .dark ? .white.opacity(0.15) : .black.opacity(0.2)
+                    context.stroke(path, with: .color(strokeColor), lineWidth: 0.5)
 
                     // Label
                     if insetRect.width > 40 && insetRect.height > 16 {

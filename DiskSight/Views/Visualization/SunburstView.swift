@@ -4,6 +4,7 @@ struct SunburstView: View {
     let nodes: [FileNode]
     let onDrillDown: (FileNode) -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var hoveredPath: String?
     @State private var tooltipNode: FileNode?
     @State private var tooltipPosition: CGPoint = .zero
@@ -38,7 +39,8 @@ struct SunburstView: View {
                     )
 
                     context.fill(Path(path), with: .color(fillColor))
-                    context.stroke(Path(path), with: .color(.black.opacity(0.3)), lineWidth: 0.5)
+                    let strokeColor: Color = colorScheme == .dark ? .white.opacity(0.15) : .black.opacity(0.3)
+                    context.stroke(Path(path), with: .color(strokeColor), lineWidth: 0.5)
                 }
             }
             .onContinuousHover { phase in

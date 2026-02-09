@@ -39,6 +39,7 @@
 		FF66AA77BB88CC99DD000004 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000003 /* SettingsView.swift */; };
 		FF66AA77BB88CC99DD000006 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000005 /* OnboardingView.swift */; };
 		FF66AA77BB88CC99DD000008 /* FileRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000007 /* FileRowView.swift */; };
+		AA22BB33CC44DD55EE660002 /* CSVExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA22BB33CC44DD55EE660001 /* CSVExporter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -74,6 +75,7 @@
 		FF66AA77BB88CC99DD000003 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		FF66AA77BB88CC99DD000005 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		FF66AA77BB88CC99DD000007 /* FileRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileRowView.swift; sourceTree = "<group>"; };
+		AA22BB33CC44DD55EE660001 /* CSVExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CSVExporter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -146,6 +148,7 @@
 				CC33DD44EE55FF66AA770003 /* Hashing */,
 				CC33DD44EE55FF66AA770006 /* Analysis */,
 				EE55FF66AA77BB88CC990003 /* Monitor */,
+				AA22BB33CC44DD55EE660003 /* Export */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -287,6 +290,14 @@
 			path = Monitor;
 			sourceTree = "<group>";
 		};
+		AA22BB33CC44DD55EE660003 /* Export */ = {
+			isa = PBXGroup;
+			children = (
+				AA22BB33CC44DD55EE660001 /* CSVExporter.swift */,
+			);
+			path = Export;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -383,6 +394,7 @@
 				FF66AA77BB88CC99DD000004 /* SettingsView.swift in Sources */,
 				FF66AA77BB88CC99DD000006 /* OnboardingView.swift in Sources */,
 				FF66AA77BB88CC99DD000008 /* FileRowView.swift in Sources */,
+				AA22BB33CC44DD55EE660002 /* CSVExporter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

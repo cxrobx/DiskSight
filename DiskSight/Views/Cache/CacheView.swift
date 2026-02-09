@@ -2,8 +2,9 @@ import SwiftUI
 
 struct CacheView: View {
     @EnvironmentObject var appState: AppState
-    @State private var detectedCaches: [DetectedCache] = []
     @State private var isLoading = false
+
+    private var detectedCaches: [DetectedCache] { appState.detectedCaches ?? [] }
     @State private var showConfirmClean = false
     @State private var cacheToClean: DetectedCache?
 
@@ -38,7 +39,11 @@ struct CacheView: View {
             }
         }
         .task {
-            await detectCaches()
+            if detectedCaches.isEmpty && appState.detectedCaches == nil {
+                isLoading = true
+                await appState.loadCacheData()
+                isLoading = false
+            }
         }
         .alert("Clean Cache?", isPresented: $showConfirmClean) {
             Button("Clean", role: .destructive) {
@@ -82,7 +87,12 @@ struct CacheView: View {
             }
 
             Button {
-                Task { await detectCaches() }
+                Task {
+                    appState.detectedCaches = nil
+                    isLoading = true
+                    await appState.loadCacheData()
+                    isLoading = false
+                }
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
@@ -175,8 +185,8 @@ struct CacheView: View {
 
     private func detectCaches() async {
         isLoading = true
-        let detector = CacheDetector(repository: appState.fileRepository)
-        detectedCaches = (try? await detector.detectCaches()) ?? []
+        appState.detectedCaches = nil
+        await appState.loadCacheData()
         isLoading = false
     }
 
@@ -187,6 +197,7 @@ struct CacheView: View {
                 try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
                 try? await appState.fileRepository.deleteFile(path: path)
             }
+            appState.invalidateCache()
             await detectCaches()
         }
     }
@@ -200,6 +211,7 @@ struct CacheView: View {
                     try? await appState.fileRepository.deleteFile(path: path)
                 }
             }
+            appState.invalidateCache()
             await detectCaches()
         }
     }

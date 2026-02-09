@@ -6,12 +6,18 @@ struct DiskSightApp: App {
     @State private var showOnboarding = false
     @State private var showSearch = false
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
+
+    private var selectedColorScheme: ColorScheme? {
+        (AppearanceMode(rawValue: appearanceMode) ?? .system).colorScheme
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 900, minHeight: 600)
+                .preferredColorScheme(selectedColorScheme)
                 .sheet(isPresented: $showOnboarding) {
                     OnboardingView(isPresented: $showOnboarding) { url in
                         hasCompletedOnboarding = true
@@ -58,6 +64,14 @@ struct DiskSightApp: App {
                     appState.selectedSection = .cache
                 }
                 .keyboardShortcut("5", modifiers: .command)
+            }
+
+            CommandGroup(after: .saveItem) {
+                Button("Export as CSV...") {
+                    appState.exportCSV()
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(appState.lastScanSession == nil)
             }
 
             CommandGroup(replacing: .textEditing) {

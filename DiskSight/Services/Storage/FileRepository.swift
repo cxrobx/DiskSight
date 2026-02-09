@@ -341,6 +341,16 @@ actor FileRepository {
         }
     }
 
+    // MARK: - Export
+
+    func allFiles(forSession sessionId: Int64) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode.filter(Column("scan_session_id") == sessionId)
+                .order(Column("path"))
+                .fetchAll(db)
+        }
+    }
+
     // MARK: - Search
 
     func searchFiles(query: String, limit: Int = 100) throws -> [FileNode] {

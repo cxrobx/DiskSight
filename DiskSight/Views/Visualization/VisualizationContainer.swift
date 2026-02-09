@@ -25,10 +25,10 @@ struct BreadcrumbItem: Identifiable, Equatable {
 struct VisualizationContainer: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("visualizationMode") private var selectedMode: VisualizationMode = .treemap
-    @State private var currentPath: String?
-    @State private var breadcrumbs: [BreadcrumbItem] = []
-    @State private var childNodes: [FileNode] = []
     @State private var isLoading = false
+
+    private var childNodes: [FileNode] { appState.vizChildNodes }
+    private var breadcrumbs: [BreadcrumbItem] { appState.vizBreadcrumbs }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,7 +51,11 @@ struct VisualizationContainer: View {
             }
         }
         .task {
-            await loadRoot()
+            if childNodes.isEmpty {
+                isLoading = true
+                await appState.loadVisualizationRoot()
+                isLoading = false
+            }
         }
     }
 
@@ -102,7 +106,11 @@ struct VisualizationContainer: View {
     private var breadcrumbBar: some View {
         HStack(spacing: 4) {
             Button {
-                Task { await loadRoot() }
+                Task {
+                    isLoading = true
+                    await appState.vizNavigateToRoot()
+                    isLoading = false
+                }
             } label: {
                 Image(systemName: "house.fill")
                     .font(.caption)
@@ -117,7 +125,11 @@ struct VisualizationContainer: View {
                         .foregroundStyle(.tertiary)
 
                     Button(crumb.name) {
-                        navigateTo(crumb)
+                        Task {
+                            isLoading = true
+                            await appState.vizNavigateTo(crumb)
+                            isLoading = false
+                        }
                     }
                     .buttonStyle(.borderless)
                     .font(.caption)
@@ -145,65 +157,12 @@ struct VisualizationContainer: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func loadRoot() async {
-        isLoading = true
-        breadcrumbs = []
-        currentPath = nil
-
-        do {
-            if let root = try await appState.fileRepository.rootNode() {
-                currentPath = root.path
-                childNodes = try await appState.fileRepository.childrenWithSizes(ofPath: root.path)
-                breadcrumbs = []
-            } else {
-                childNodes = []
-            }
-        } catch {
-            childNodes = []
-        }
-
-        isLoading = false
-    }
-
     private func drillDown(to node: FileNode) {
         guard node.isDirectory else { return }
 
         Task {
             isLoading = true
-
-            if let currentPath = currentPath {
-                let name = breadcrumbs.isEmpty
-                    ? (appState.scanRootPath?.lastPathComponent ?? "Root")
-                    : URL(fileURLWithPath: currentPath).lastPathComponent
-                if !breadcrumbs.contains(where: { $0.path == currentPath }) {
-                    breadcrumbs.append(BreadcrumbItem(id: currentPath, name: name, path: currentPath))
-                }
-            }
-
-            currentPath = node.path
-            do {
-                childNodes = try await appState.fileRepository.childrenWithSizes(ofPath: node.path)
-            } catch {
-                childNodes = []
-            }
-            isLoading = false
-        }
-    }
-
-    private func navigateTo(_ crumb: BreadcrumbItem) {
-        Task {
-            isLoading = true
-
-            if let index = breadcrumbs.firstIndex(where: { $0.id == crumb.id }) {
-                breadcrumbs = Array(breadcrumbs.prefix(index))
-            }
-
-            currentPath = crumb.path
-            do {
-                childNodes = try await appState.fileRepository.childrenWithSizes(ofPath: crumb.path)
-            } catch {
-                childNodes = []
-            }
+            await appState.vizDrillDown(to: node)
             isLoading = false
         }
     }

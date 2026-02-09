@@ -4,6 +4,7 @@ struct TreemapView: View {
     let nodes: [FileNode]
     let onDrillDown: (FileNode) -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var hoveredId: String?
     @State private var tooltipNode: FileNode?
     @State private var tooltipPosition: CGPoint = .zero
@@ -35,7 +36,8 @@ struct TreemapView: View {
                         .path(in: insetRect)
 
                     context.fill(path, with: .color(fillColor))
-                    context.stroke(path, with: .color(.black.opacity(0.3)), lineWidth: 0.5)
+                    let strokeColor: Color = colorScheme == .dark ? .white.opacity(0.15) : .black.opacity(0.3)
+                    context.stroke(path, with: .color(strokeColor), lineWidth: 0.5)
 
                     // Label if rect is large enough
                     if insetRect.width > 50 && insetRect.height > 20 {
@@ -105,24 +107,25 @@ struct TreemapView: View {
 
 struct VisualizationTooltip: View {
     let node: FileNode
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(node.name)
                 .font(.caption.bold())
-                .foregroundColor(.white)
+                .foregroundColor(.primary)
             Text(node.path)
                 .font(.caption2)
-                .foregroundColor(.white.opacity(0.7))
+                .foregroundColor(.secondary)
                 .lineLimit(2)
                 .truncationMode(.middle)
             Text(SizeFormatter.format(node.size))
                 .font(.caption.monospacedDigit())
-                .foregroundColor(.white)
+                .foregroundColor(.primary)
             if let modified = node.modifiedAt {
                 Text("Modified: \(Date(timeIntervalSince1970: modified).relativeString)")
                     .font(.caption2)
-                    .foregroundColor(.white.opacity(0.6))
+                    .foregroundColor(.secondary)
             }
             HStack(spacing: 8) {
                 if node.isDirectory {
@@ -130,14 +133,14 @@ struct VisualizationTooltip: View {
                         .foregroundColor(.cyan)
                 }
                 Text("Right-click for options")
-                    .foregroundColor(.white.opacity(0.5))
+                    .foregroundStyle(.tertiary)
             }
             .font(.caption2)
         }
         .padding(10)
         .frame(maxWidth: 280)
-        .background(Color.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-        .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.5 : 0.2), radius: 6, y: 2)
     }
 }
 

@@ -2,9 +2,9 @@ import SwiftUI
 
 struct StaleFilesView: View {
     @EnvironmentObject var appState: AppState
-    @State private var staleFiles: [FileNode] = []
-    @State private var selectedThreshold: StaleThreshold = .oneYear
     @State private var isLoading = false
+
+    private var staleFiles: [FileNode] { appState.staleFiles ?? [] }
     @State private var showConfirmTrash = false
     @State private var filesToTrash: [FileNode] = []
 
@@ -31,10 +31,19 @@ struct StaleFilesView: View {
             }
         }
         .task {
-            await loadStaleFiles()
+            if staleFiles.isEmpty {
+                isLoading = true
+                await appState.loadStaleFiles(threshold: appState.staleThreshold)
+                isLoading = false
+            }
         }
-        .onChange(of: selectedThreshold) {
-            Task { await loadStaleFiles() }
+        .onChange(of: appState.staleThreshold) {
+            Task {
+                appState.staleFiles = nil
+                isLoading = true
+                await appState.loadStaleFiles(threshold: appState.staleThreshold)
+                isLoading = false
+            }
         }
         .alert("Move to Trash?", isPresented: $showConfirmTrash) {
             Button("Move to Trash", role: .destructive) {
@@ -60,7 +69,7 @@ struct StaleFilesView: View {
 
             Spacer()
 
-            Picker("Not accessed in:", selection: $selectedThreshold) {
+            Picker("Not accessed in:", selection: $appState.staleThreshold) {
                 ForEach(StaleThreshold.allCases) { threshold in
                     Text(threshold.rawValue).tag(threshold)
                 }
@@ -77,7 +86,7 @@ struct StaleFilesView: View {
                 .foregroundStyle(.secondary)
             Text("No Stale Files Found")
                 .font(.title3)
-            Text("No files older than \(selectedThreshold.rawValue.lowercased()) and larger than 1 MB")
+            Text("No files older than \(appState.staleThreshold.rawValue.lowercased()) and larger than 1 MB")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -96,7 +105,7 @@ struct StaleFilesView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(SizeFormatter.format(totalSize))
                                 .font(.title3.bold())
-                            Text("\(staleFiles.count) files not accessed in \(selectedThreshold.rawValue.lowercased())")
+                            Text("\(staleFiles.count) files not accessed in \(appState.staleThreshold.rawValue.lowercased())")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -153,13 +162,6 @@ struct StaleFilesView: View {
         }
     }
 
-    private func loadStaleFiles() async {
-        isLoading = true
-        let finder = StaleFinder(repository: appState.fileRepository)
-        staleFiles = (try? await finder.findStaleFiles(threshold: selectedThreshold)) ?? []
-        isLoading = false
-    }
-
     private func trashFiles(_ files: [FileNode]) {
         Task {
             for file in files {
@@ -169,7 +171,10 @@ struct StaleFilesView: View {
                     try await appState.fileRepository.deleteFile(path: file.path)
                 } catch {}
             }
-            await loadStaleFiles()
+            appState.invalidateCache()
+            isLoading = true
+            await appState.loadStaleFiles(threshold: appState.staleThreshold)
+            isLoading = false
         }
     }
 }
