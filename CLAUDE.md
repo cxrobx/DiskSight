@@ -1,56 +1,137 @@
 # DiskSight
 
-## Current Phase: 2
+## Current Phase: COMPLETE (All 7 phases done)
 
 ## Architecture
 - **Pattern:** MVVM with SwiftUI
 - **Min target:** macOS 14.0 (Sonoma)
 - **Dependencies:** GRDB.swift 7.8.0 (SQLite), xxHash-Swift 1.1.1 (hashing)
 - **Build:** `xcodebuild -scheme DiskSight -destination 'platform=macOS' build`
+- **Bundle ID:** com.disksight.app
 
-## Phase 1 (Complete)
-Built project scaffold with:
-- Xcode project with SPM dependency resolution
-- SQLite database via GRDB with WAL mode, migrations for `files`, `scan_sessions`, `cache_patterns` tables
-- `FileScanner` — async directory walker using `FileManager.enumerator`, batch inserts (1000/tx)
-- `FileRepository` actor — CRUD for files, scan sessions, directory size calculation
-- `Database` singleton — connection pool, migration management
-- Basic SwiftUI shell: `NavigationSplitView` with sidebar sections (Overview, Visualization, Duplicates, Stale Files, Cache)
-- Scan button with `NSOpenPanel` folder picker, progress reporting via `AsyncStream`, cancellation support
-- `AppState` `ObservableObject` — manages scan lifecycle, section selection
-- Full Disk Access entitlement + runtime permission check
-- Overview placeholder showing scan progress and completion status
+## Phase Summary
+
+### Phase 1: Project Scaffold + Data Layer
+- Xcode project with SPM deps
+- SQLite schema (files, scan_sessions, cache_patterns) via GRDB migrations
+- FileScanner with async directory walking, batch inserts (1000/tx)
+- FileRepository actor for all DB operations
+- Basic SwiftUI NavigationSplitView shell
+- Full Disk Access entitlement + runtime check
+
+### Phase 2: Overview Dashboard + Treemap
+- Disk usage ring chart (total/used/free)
+- Top folders bar chart, scan status card, quick actions
+- Squarified treemap algorithm (TreemapLayout)
+- SwiftUI Canvas rendering with file-type color coding
+- Click-to-drill-down with breadcrumb navigation
+- Hover tooltips
+
+### Phase 3: Sunburst + Icicle Visualizations
+- SunburstView with concentric ring arcs
+- IcicleView with horizontal stacked rectangles
+- Segmented control mode switcher (persisted via @AppStorage)
+- Consistent drill-down/breadcrumb across all 3 modes
+
+### Phase 4: Duplicate Detection
+- 3-stage pipeline: size grouping → partial hash → full hash
+- FileHasher with xxHash (partial: first+last 8KB, full: streaming)
+- DuplicatesView with group cards, reclaimable space banner
+- Per-group actions: Keep Newest, Trash All But First
+- Trash-based deletion (safe, reversible)
+
+### Phase 5: Stale Files + Cache Detection
+- StaleFinder with configurable thresholds (6mo/1yr/2yr/5yr)
+- CacheDetector with 10 pre-seeded patterns (System/Developer/Package Manager)
+- Safety-coded cards (green/yellow/red)
+- Clean All Safe bulk action
+- StaleFilesView with threshold picker
+
+### Phase 6: FSEvents Real-Time Monitoring
+- Native C API bridging via FSEventStreamCreate
+- File-level event granularity
+- Event coalescing with 2s debounce
+- Incremental DB updates (create/modify → upsert, delete → remove)
+- Event ID persistence for resume across launches
+- Auto-start monitoring after scan
+
+### Phase 7: Polish + Distribution
+- Keyboard shortcuts (Cmd+1-5 sections, Cmd+F search)
+- Onboarding flow with feature overview + Full Disk Access guidance
+- Settings panel (viz mode, monitoring, stale threshold)
+- File search via LIKE queries
+- FileRowView with type-specific icons
+- SQL tracing gated behind #if DEBUG
+- Code signing entitlements configured
 
 ## Key Types
-- `FileNode` — GRDB `FetchableRecord`/`PersistableRecord` for file metadata (path, size, hashes, timestamps)
-- `ScanSession` — tracks scan root, timing, file count, total size, FSEvents ID
-- `DuplicateGroup` — groups files by content hash with reclaimable size calc
-- `AppState` — `@MainActor ObservableObject` with scan state machine (idle/scanning/completed/error)
-- `FileScanner` — struct with `scan(rootURL:sessionId:) -> AsyncStream<ScanProgress>`
-- `FileRepository` — actor wrapping all DB operations
-- `Database` — singleton with `DatabasePool` and migration management
+- `FileNode` — GRDB record for file metadata
+- `ScanSession` — Scan tracking with FSEvents ID
+- `DuplicateGroup` — Groups files by content hash
+- `CachePattern` — GRDB record for cache detection patterns
+- `AppState` — @MainActor ObservableObject, scan/monitor lifecycle
+- `FileScanner` — Async directory walker
+- `FileRepository` — Actor for all DB operations
+- `Database` — Singleton with DatabasePool + migrations
+- `FSEventsMonitor` — C API bridge with debounce
+- `DuplicateFinder` — 3-stage duplicate pipeline
+- `StaleFinder` — Date-based stale file detection
+- `CacheDetector` — Pattern-based cache detection
+- `FileHasher` — xxHash partial + full hashing
+- `TreemapAlgorithm` — Squarified treemap layout
+- `SunburstLayout` — Concentric ring layout
+- `IcicleLayout` — Stacked rectangle layout
 
 ## Service Connections
 ```
-DiskSightApp → AppState → FileRepository → Database (SQLite)
-                        → FileScanner → FileRepository
+DiskSightApp
+ └─ AppState
+     ├─ FileRepository ← Database (SQLite/GRDB)
+     ├─ FileScanner → FileRepository
+     ├─ FSEventsMonitor → FileRepository
+     ├─ DuplicateFinder → FileRepository + FileHasher
+     ├─ StaleFinder → FileRepository
+     └─ CacheDetector → FileRepository
 ```
 
-## Files Created
-- `DiskSight/App/DiskSightApp.swift` — @main entry, ContentView with NavigationSplitView
-- `DiskSight/App/AppState.swift` — Global state, scan lifecycle management
-- `DiskSight/Models/FileNode.swift` — Core file model with GRDB conformance
-- `DiskSight/Models/ScanSession.swift` — Scan metadata model
-- `DiskSight/Models/DuplicateGroup.swift` — Duplicate file grouping
-- `DiskSight/Services/Scanner/FileScanner.swift` — Async directory walker
-- `DiskSight/Services/Storage/Database.swift` — SQLite + migrations
-- `DiskSight/Services/Storage/FileRepository.swift` — File CRUD operations
-- `DiskSight/Views/Sidebar/SidebarView.swift` — Navigation sidebar with scan controls
-- `DiskSight/Views/Overview/OverviewView.swift` — Overview with scan status
-- `DiskSight/Views/Shared/SizeFormatter.swift` — Byte count formatting
-- `DiskSight/Utilities/Extensions.swift` — URL, Date helpers
-
-## Known Issues
-- Directory size calculation only sums immediate children (not recursive)
-- No SQL tracing toggle (always on in Database.swift)
-- Package.swift in root is for reference only; actual deps managed via xcodeproj
+## Files
+```
+DiskSight/
+├── App/
+│   ├── DiskSightApp.swift
+│   └── AppState.swift
+├── Models/
+│   ├── FileNode.swift
+│   ├── ScanSession.swift
+│   └── DuplicateGroup.swift
+├── Services/
+│   ├── Scanner/FileScanner.swift
+│   ├── Storage/Database.swift
+│   ├── Storage/FileRepository.swift
+│   ├── Monitor/FSEventsMonitor.swift
+│   ├── Analysis/DuplicateFinder.swift
+│   ├── Analysis/StaleFinder.swift
+│   ├── Analysis/CacheDetector.swift
+│   └── Hashing/FileHasher.swift
+├── Views/
+│   ├── Sidebar/SidebarView.swift
+│   ├── Overview/OverviewView.swift
+│   ├── Visualization/
+│   │   ├── TreemapLayout.swift
+│   │   ├── TreemapView.swift
+│   │   ├── SunburstView.swift
+│   │   ├── IcicleView.swift
+│   │   └── VisualizationContainer.swift
+│   ├── Duplicates/DuplicatesView.swift
+│   ├── StaleFiles/StaleFilesView.swift
+│   ├── Cache/CacheView.swift
+│   └── Shared/
+│       ├── SizeFormatter.swift
+│       ├── FileRowView.swift
+│       ├── SearchView.swift
+│       ├── SettingsView.swift
+│       └── OnboardingView.swift
+├── Utilities/Extensions.swift
+├── Resources/Assets.xcassets
+└── DiskSight.entitlements
+```
