@@ -30,11 +30,9 @@ struct ContentView: View {
             case .duplicates:
                 DuplicatesView()
             case .staleFiles:
-                Text("Stale Files")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                StaleFilesView()
             case .cache:
-                Text("Cache")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                CacheView()
             }
         }
     }

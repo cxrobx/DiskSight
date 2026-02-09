@@ -253,4 +253,54 @@ actor FileRepository {
             try db.execute(sql: "DELETE FROM files WHERE path = ?", arguments: [path])
         }
     }
+
+    // MARK: - Stale Files
+
+    func staleFiles(accessedBefore cutoff: Double, minSize: Int64 = 1_048_576) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("is_directory") == false)
+                .filter(Column("accessed_at") != nil)
+                .filter(Column("accessed_at") < cutoff)
+                .filter(Column("size") >= minSize)
+                .order(Column("accessed_at").asc)
+                .limit(500)
+                .fetchAll(db)
+        }
+    }
+
+    // MARK: - Cache Patterns
+
+    func cachePatternCount() throws -> Int {
+        try database.dbPool.read { db in
+            try CachePattern.fetchCount(db)
+        }
+    }
+
+    func allCachePatterns() throws -> [CachePattern] {
+        try database.dbPool.read { db in
+            try CachePattern.fetchAll(db)
+        }
+    }
+
+    func insertCachePatterns(_ patterns: [(String, String, String, String)]) throws {
+        try database.dbPool.write { db in
+            for (pattern, category, safety, description) in patterns {
+                var cp = CachePattern(pattern: pattern, category: category, safety: safety, description: description)
+                try cp.insert(db)
+            }
+        }
+    }
+
+    func matchingPaths(likePattern: String) throws -> ([String], Int64) {
+        try database.dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT path, size FROM files
+                WHERE path LIKE ? AND is_directory = 0
+                """, arguments: [likePattern])
+            let paths = rows.compactMap { $0["path"] as String? }
+            let totalSize = rows.reduce(Int64(0)) { $0 + ($1["size"] as Int64? ?? 0) }
+            return (paths, totalSize)
+        }
+    }
 }

@@ -30,6 +30,10 @@
 		CC33DD44EE55FF66AA770002 /* FileHasher.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC33DD44EE55FF66AA770001 /* FileHasher.swift */; };
 		CC33DD44EE55FF66AA770005 /* DuplicateFinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC33DD44EE55FF66AA770004 /* DuplicateFinder.swift */; };
 		CC33DD44EE55FF66AA770008 /* DuplicatesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC33DD44EE55FF66AA770007 /* DuplicatesView.swift */; };
+		DD44EE55FF66AA77BB880002 /* StaleFinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD44EE55FF66AA77BB880001 /* StaleFinder.swift */; };
+		DD44EE55FF66AA77BB880004 /* CacheDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD44EE55FF66AA77BB880003 /* CacheDetector.swift */; };
+		DD44EE55FF66AA77BB880006 /* StaleFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD44EE55FF66AA77BB880005 /* StaleFilesView.swift */; };
+		DD44EE55FF66AA77BB880009 /* CacheView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD44EE55FF66AA77BB880008 /* CacheView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -56,6 +60,10 @@
 		CC33DD44EE55FF66AA770001 /* FileHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileHasher.swift; sourceTree = "<group>"; };
 		CC33DD44EE55FF66AA770004 /* DuplicateFinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicateFinder.swift; sourceTree = "<group>"; };
 		CC33DD44EE55FF66AA770007 /* DuplicatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicatesView.swift; sourceTree = "<group>"; };
+		DD44EE55FF66AA77BB880001 /* StaleFinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaleFinder.swift; sourceTree = "<group>"; };
+		DD44EE55FF66AA77BB880003 /* CacheDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheDetector.swift; sourceTree = "<group>"; };
+		DD44EE55FF66AA77BB880005 /* StaleFilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaleFilesView.swift; sourceTree = "<group>"; };
+		DD44EE55FF66AA77BB880008 /* CacheView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -156,6 +164,8 @@
 				A68E5A9978FC822A593DEC49 /* Shared */,
 				AA11BB22CC33DD44EE550007 /* Visualization */,
 				CC33DD44EE55FF66AA770009 /* Duplicates */,
+				DD44EE55FF66AA77BB880007 /* StaleFiles */,
+				DD44EE55FF66AA77BB88000A /* Cache */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -224,6 +234,8 @@
 			isa = PBXGroup;
 			children = (
 				CC33DD44EE55FF66AA770004 /* DuplicateFinder.swift */,
+				DD44EE55FF66AA77BB880001 /* StaleFinder.swift */,
+				DD44EE55FF66AA77BB880003 /* CacheDetector.swift */,
 			);
 			path = Analysis;
 			sourceTree = "<group>";
@@ -234,6 +246,22 @@
 				CC33DD44EE55FF66AA770007 /* DuplicatesView.swift */,
 			);
 			path = Duplicates;
+			sourceTree = "<group>";
+		};
+		DD44EE55FF66AA77BB880007 /* StaleFiles */ = {
+			isa = PBXGroup;
+			children = (
+				DD44EE55FF66AA77BB880005 /* StaleFilesView.swift */,
+			);
+			path = StaleFiles;
+			sourceTree = "<group>";
+		};
+		DD44EE55FF66AA77BB88000A /* Cache */ = {
+			isa = PBXGroup;
+			children = (
+				DD44EE55FF66AA77BB880008 /* CacheView.swift */,
+			);
+			path = Cache;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -323,6 +351,10 @@
 				CC33DD44EE55FF66AA770002 /* FileHasher.swift in Sources */,
 				CC33DD44EE55FF66AA770005 /* DuplicateFinder.swift in Sources */,
 				CC33DD44EE55FF66AA770008 /* DuplicatesView.swift in Sources */,
+				DD44EE55FF66AA77BB880002 /* StaleFinder.swift in Sources */,
+				DD44EE55FF66AA77BB880004 /* CacheDetector.swift in Sources */,
+				DD44EE55FF66AA77BB880006 /* StaleFilesView.swift in Sources */,
+				DD44EE55FF66AA77BB880009 /* CacheView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
