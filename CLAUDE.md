@@ -35,7 +35,7 @@ Full list in `.claude/rules/architecture.md`
 | File | Purpose | Loaded |
 |------|---------|--------|
 | `.claude/rules/architecture.md` | System patterns, invariants | Always |
-| `.claude/rules/gotchas.md` | Known issues (8 items) | Always |
+| `.claude/rules/gotchas.md` | Known issues (11 items) | Always |
 | `docs/README.md` | Documentation index | On demand |
 | `docs/setup.md` | Build & environment setup | On demand |
 | `CHANGELOG.md` | Version history | On demand |
@@ -58,10 +58,15 @@ DiskSightApp
      ├─ FSEventsMonitor → FileRepository
      ├─ DuplicateFinder → FileRepository + FileHasher
      ├─ StaleFinder → FileRepository
-     └─ CacheDetector → FileRepository
+     ├─ CacheDetector → FileRepository
+     └─ CSVExporter (static, called from exportCSV())
 ```
 
 ## Recent Learnings
 - 2026-02-09: Data caching pattern — lift view data into AppState @Published properties, views read computed props, loadXxx() no-ops if cached, invalidateCache() nils everything
 - 2026-02-09: SourceKit cross-file diagnostics are noise during editing — trust xcodebuild
 - 2026-02-09: Always re-read files before editing — linter may modify between reads
+- 2026-02-09: CSV export — CSVExporter static enum pattern, NSSavePanel for file save, allFiles(forSession:) for bulk fetch
+- 2026-02-09: View computed properties from AppState are read-only — assign to appState.xxx directly, not the local computed bridge
+- 2026-02-09: .foregroundColor vs .foregroundStyle — use the latter for ShapeStyle values like .tertiary
+- 2026-02-09: SwiftUI .task only fires once — views that depend on scan completion need .onChange(of: scanState) to reload after scan finishes

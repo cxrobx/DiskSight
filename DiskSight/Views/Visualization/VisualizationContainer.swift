@@ -51,10 +51,20 @@ struct VisualizationContainer: View {
             }
         }
         .task {
-            if childNodes.isEmpty {
+            if childNodes.isEmpty, case .completed = appState.scanState {
                 isLoading = true
                 await appState.loadVisualizationRoot()
                 isLoading = false
+            }
+        }
+        .onChange(of: appState.scanState) { _, newState in
+            if case .completed = newState {
+                Task {
+                    isLoading = true
+                    appState.vizChildNodes = []
+                    await appState.loadVisualizationRoot()
+                    isLoading = false
+                }
             }
         }
     }

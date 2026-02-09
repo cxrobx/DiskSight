@@ -2,6 +2,11 @@
 
 All notable changes to DiskSight are documented here.
 
+## [1.0.3] - 2026-02-09
+
+### Fixed
+- Visualization tab showing "No Data to Visualize" after scan completes — `.task` only fires once on view appearance, so if the view was already visible during scanning it never reloaded. Added `.onChange(of: scanState)` to reload visualization data when scan transitions to `.completed`, and guarded `.task` to skip loading during active scans.
+
 ## [1.0.0] - 2025-02-09
 
 ### Added
@@ -35,3 +40,19 @@ All notable changes to DiskSight are documented here.
 
 ### Infrastructure
 - Created compound documentation infrastructure (`.claude/agents/`, `.claude/rules/`, `docs/`)
+
+## [1.0.2] - 2026-02-09
+
+### Added
+- **CSV Export**: Export scan data as CSV with all file paths, sizes, timestamps
+  - `CSVExporter` utility at `Services/Export/CSVExporter.swift` with proper CSV escaping and ISO 8601 timestamps
+  - `exportCSV()` method on AppState with NSSavePanel integration
+  - "Export CSV" button in Overview quick actions (`.borderedProminent` style)
+  - File menu "Export as CSV..." command with `Cmd+Shift+E` shortcut
+  - `allFiles(forSession:)` query on FileRepository for bulk export
+- CSV headers: `path, name, size_bytes, size_formatted, is_directory, file_type, modified_at, accessed_at, created_at`
+
+### Fixed
+- TreemapView: `.foregroundColor(.tertiary)` → `.foregroundStyle(.tertiary)` (type mismatch)
+- CacheView: `detectCaches()` delegated to `appState.loadCacheData()` (was assigning to computed property)
+- VisualizationContainer: removed stale `loadRoot()`/`navigateTo()` methods that referenced removed local state
