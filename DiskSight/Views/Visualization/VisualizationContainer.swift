@@ -1,5 +1,21 @@
 import SwiftUI
 
+enum VisualizationMode: String, CaseIterable, Identifiable {
+    case treemap = "Treemap"
+    case sunburst = "Sunburst"
+    case icicle = "Icicle"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .treemap: return "square.grid.3x3.fill"
+        case .sunburst: return "circle.circle"
+        case .icicle: return "chart.bar.fill"
+        }
+    }
+}
+
 struct BreadcrumbItem: Identifiable, Equatable {
     let id: String
     let name: String
@@ -8,6 +24,7 @@ struct BreadcrumbItem: Identifiable, Equatable {
 
 struct VisualizationContainer: View {
     @EnvironmentObject var appState: AppState
+    @AppStorage("visualizationMode") private var selectedMode: VisualizationMode = .treemap
     @State private var currentPath: String?
     @State private var breadcrumbs: [BreadcrumbItem] = []
     @State private var childNodes: [FileNode] = []
@@ -15,8 +32,8 @@ struct VisualizationContainer: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Breadcrumb bar
-            breadcrumbBar
+            // Toolbar with mode switcher and breadcrumbs
+            toolbarBar
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(.bar)
@@ -30,13 +47,55 @@ struct VisualizationContainer: View {
             } else if childNodes.isEmpty {
                 emptyState
             } else {
-                TreemapView(nodes: childNodes) { node in
-                    drillDown(to: node)
-                }
+                visualizationContent
             }
         }
         .task {
             await loadRoot()
+        }
+    }
+
+    @ViewBuilder
+    private var visualizationContent: some View {
+        switch selectedMode {
+        case .treemap:
+            TreemapView(nodes: childNodes) { node in
+                drillDown(to: node)
+            }
+        case .sunburst:
+            SunburstView(nodes: childNodes) { node in
+                drillDown(to: node)
+            }
+        case .icicle:
+            IcicleView(nodes: childNodes) { node in
+                drillDown(to: node)
+            }
+        }
+    }
+
+    private var toolbarBar: some View {
+        HStack(spacing: 8) {
+            // Mode switcher
+            Picker("Mode", selection: $selectedMode) {
+                ForEach(VisualizationMode.allCases) { mode in
+                    Label(mode.rawValue, systemImage: mode.icon)
+                        .tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 260)
+
+            Divider()
+                .frame(height: 16)
+
+            // Breadcrumbs
+            breadcrumbBar
+
+            Spacer()
+
+            Text("\(childNodes.count) items")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -69,12 +128,6 @@ struct VisualizationContainer: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-
-            Spacer()
-
-            Text("\(childNodes.count) items")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
         }
     }
 
@@ -118,7 +171,6 @@ struct VisualizationContainer: View {
         Task {
             isLoading = true
 
-            // Add current to breadcrumbs
             if let currentPath = currentPath {
                 let name = breadcrumbs.isEmpty
                     ? (appState.scanRootPath?.lastPathComponent ?? "Root")
@@ -142,7 +194,6 @@ struct VisualizationContainer: View {
         Task {
             isLoading = true
 
-            // Remove breadcrumbs after this one
             if let index = breadcrumbs.firstIndex(where: { $0.id == crumb.id }) {
                 breadcrumbs = Array(breadcrumbs.prefix(index))
             }
@@ -156,4 +207,8 @@ struct VisualizationContainer: View {
             isLoading = false
         }
     }
+}
+
+extension VisualizationMode: RawRepresentable {
+    // Already conforms via String rawValue
 }

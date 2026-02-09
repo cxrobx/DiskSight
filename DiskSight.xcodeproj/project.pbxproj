@@ -25,6 +25,8 @@
 		AA11BB22CC33DD44EE550002 /* TreemapLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550001 /* TreemapLayout.swift */; };
 		AA11BB22CC33DD44EE550004 /* TreemapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550003 /* TreemapView.swift */; };
 		AA11BB22CC33DD44EE550006 /* VisualizationContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */; };
+		BB22CC33DD44EE55FF660002 /* SunburstView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB22CC33DD44EE55FF660001 /* SunburstView.swift */; };
+		BB22CC33DD44EE55FF660004 /* IcicleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB22CC33DD44EE55FF660003 /* IcicleView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -46,6 +48,8 @@
 		AA11BB22CC33DD44EE550001 /* TreemapLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreemapLayout.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550003 /* TreemapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreemapView.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationContainer.swift; sourceTree = "<group>"; };
+		BB22CC33DD44EE55FF660001 /* SunburstView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SunburstView.swift; sourceTree = "<group>"; };
+		BB22CC33DD44EE55FF660003 /* IcicleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IcicleView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -193,6 +197,8 @@
 				AA11BB22CC33DD44EE550001 /* TreemapLayout.swift */,
 				AA11BB22CC33DD44EE550003 /* TreemapView.swift */,
 				AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */,
+				BB22CC33DD44EE55FF660001 /* SunburstView.swift */,
+				BB22CC33DD44EE55FF660003 /* IcicleView.swift */,
 			);
 			path = Visualization;
 			sourceTree = "<group>";
@@ -279,6 +285,8 @@
 				AA11BB22CC33DD44EE550002 /* TreemapLayout.swift in Sources */,
 				AA11BB22CC33DD44EE550004 /* TreemapView.swift in Sources */,
 				AA11BB22CC33DD44EE550006 /* VisualizationContainer.swift in Sources */,
+				BB22CC33DD44EE55FF660002 /* SunburstView.swift in Sources */,
+				BB22CC33DD44EE55FF660004 /* IcicleView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
