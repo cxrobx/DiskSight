@@ -162,4 +162,95 @@ actor FileRepository {
             return rows.map { ($0["file_type"] as String? ?? "unknown", $0["total_size"] as Int64? ?? 0) }
         }
     }
+
+    // MARK: - Duplicate Detection
+
+    func sizeMatchedFiles(minSize: Int64 = 1024) throws -> [[FileNode]] {
+        try database.dbPool.read { db in
+            let sizes = try Row.fetchAll(db, sql: """
+                SELECT size FROM files
+                WHERE is_directory = 0 AND size >= ?
+                GROUP BY size HAVING COUNT(*) > 1
+                """, arguments: [minSize])
+
+            var groups: [[FileNode]] = []
+            for row in sizes {
+                let size: Int64 = row["size"]
+                let files = try FileNode
+                    .filter(Column("is_directory") == false)
+                    .filter(Column("size") == size)
+                    .fetchAll(db)
+                if files.count > 1 {
+                    groups.append(files)
+                }
+            }
+            return groups
+        }
+    }
+
+    func updatePartialHash(path: String, hash: String) throws {
+        try database.dbPool.write { db in
+            try db.execute(sql: "UPDATE files SET partial_hash = ? WHERE path = ?", arguments: [hash, path])
+        }
+    }
+
+    func updateContentHash(path: String, hash: String) throws {
+        try database.dbPool.write { db in
+            try db.execute(sql: "UPDATE files SET content_hash = ? WHERE path = ?", arguments: [hash, path])
+        }
+    }
+
+    func partialHashMatchedFiles() throws -> [[FileNode]] {
+        try database.dbPool.read { db in
+            let hashes = try Row.fetchAll(db, sql: """
+                SELECT partial_hash FROM files
+                WHERE is_directory = 0 AND partial_hash IS NOT NULL
+                GROUP BY partial_hash HAVING COUNT(*) > 1
+                """)
+
+            var groups: [[FileNode]] = []
+            for row in hashes {
+                let hash: String = row["partial_hash"]
+                let files = try FileNode
+                    .filter(Column("is_directory") == false)
+                    .filter(Column("partial_hash") == hash)
+                    .fetchAll(db)
+                if files.count > 1 {
+                    groups.append(files)
+                }
+            }
+            return groups
+        }
+    }
+
+    func duplicateGroups() throws -> [DuplicateGroup] {
+        try database.dbPool.read { db in
+            let hashes = try Row.fetchAll(db, sql: """
+                SELECT content_hash, size FROM files
+                WHERE is_directory = 0 AND content_hash IS NOT NULL
+                GROUP BY content_hash HAVING COUNT(*) > 1
+                ORDER BY size * COUNT(*) DESC
+                """)
+
+            var groups: [DuplicateGroup] = []
+            for row in hashes {
+                let hash: String = row["content_hash"]
+                let size: Int64 = row["size"]
+                let files = try FileNode
+                    .filter(Column("is_directory") == false)
+                    .filter(Column("content_hash") == hash)
+                    .fetchAll(db)
+                if files.count > 1 {
+                    groups.append(DuplicateGroup(id: hash, files: files, fileSize: size))
+                }
+            }
+            return groups
+        }
+    }
+
+    func deleteFile(path: String) throws {
+        try database.dbPool.write { db in
+            try db.execute(sql: "DELETE FROM files WHERE path = ?", arguments: [path])
+        }
+    }
 }

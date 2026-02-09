@@ -27,6 +27,9 @@
 		AA11BB22CC33DD44EE550006 /* VisualizationContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */; };
 		BB22CC33DD44EE55FF660002 /* SunburstView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB22CC33DD44EE55FF660001 /* SunburstView.swift */; };
 		BB22CC33DD44EE55FF660004 /* IcicleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB22CC33DD44EE55FF660003 /* IcicleView.swift */; };
+		CC33DD44EE55FF66AA770002 /* FileHasher.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC33DD44EE55FF66AA770001 /* FileHasher.swift */; };
+		CC33DD44EE55FF66AA770005 /* DuplicateFinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC33DD44EE55FF66AA770004 /* DuplicateFinder.swift */; };
+		CC33DD44EE55FF66AA770008 /* DuplicatesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC33DD44EE55FF66AA770007 /* DuplicatesView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +53,9 @@
 		AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationContainer.swift; sourceTree = "<group>"; };
 		BB22CC33DD44EE55FF660001 /* SunburstView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SunburstView.swift; sourceTree = "<group>"; };
 		BB22CC33DD44EE55FF660003 /* IcicleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IcicleView.swift; sourceTree = "<group>"; };
+		CC33DD44EE55FF66AA770001 /* FileHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileHasher.swift; sourceTree = "<group>"; };
+		CC33DD44EE55FF66AA770004 /* DuplicateFinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicateFinder.swift; sourceTree = "<group>"; };
+		CC33DD44EE55FF66AA770007 /* DuplicatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicatesView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -119,6 +125,8 @@
 			children = (
 				0945AAFC759DBAE7AA129941 /* Scanner */,
 				A88B98A916016A74BB50C6B8 /* Storage */,
+				CC33DD44EE55FF66AA770003 /* Hashing */,
+				CC33DD44EE55FF66AA770006 /* Analysis */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -147,6 +155,7 @@
 				5F33D346C68BCD1C13A7AAEA /* Overview */,
 				A68E5A9978FC822A593DEC49 /* Shared */,
 				AA11BB22CC33DD44EE550007 /* Visualization */,
+				CC33DD44EE55FF66AA770009 /* Duplicates */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -201,6 +210,30 @@
 				BB22CC33DD44EE55FF660003 /* IcicleView.swift */,
 			);
 			path = Visualization;
+			sourceTree = "<group>";
+		};
+		CC33DD44EE55FF66AA770003 /* Hashing */ = {
+			isa = PBXGroup;
+			children = (
+				CC33DD44EE55FF66AA770001 /* FileHasher.swift */,
+			);
+			path = Hashing;
+			sourceTree = "<group>";
+		};
+		CC33DD44EE55FF66AA770006 /* Analysis */ = {
+			isa = PBXGroup;
+			children = (
+				CC33DD44EE55FF66AA770004 /* DuplicateFinder.swift */,
+			);
+			path = Analysis;
+			sourceTree = "<group>";
+		};
+		CC33DD44EE55FF66AA770009 /* Duplicates */ = {
+			isa = PBXGroup;
+			children = (
+				CC33DD44EE55FF66AA770007 /* DuplicatesView.swift */,
+			);
+			path = Duplicates;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -287,6 +320,9 @@
 				AA11BB22CC33DD44EE550006 /* VisualizationContainer.swift in Sources */,
 				BB22CC33DD44EE55FF660002 /* SunburstView.swift in Sources */,
 				BB22CC33DD44EE55FF660004 /* IcicleView.swift in Sources */,
+				CC33DD44EE55FF66AA770002 /* FileHasher.swift in Sources */,
+				CC33DD44EE55FF66AA770005 /* DuplicateFinder.swift in Sources */,
+				CC33DD44EE55FF66AA770008 /* DuplicatesView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

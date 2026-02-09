@@ -28,8 +28,7 @@ struct ContentView: View {
             case .visualization:
                 VisualizationContainer()
             case .duplicates:
-                Text("Duplicates")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                DuplicatesView()
             case .staleFiles:
                 Text("Stale Files")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
