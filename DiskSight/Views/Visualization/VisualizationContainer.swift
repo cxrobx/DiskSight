@@ -26,34 +26,51 @@ struct VisualizationContainer: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("visualizationMode") private var selectedMode: VisualizationMode = .treemap
     @State private var isLoading = false
+    @State private var rootTreeNode: FolderTreeNode?
 
     private var childNodes: [FileNode] { appState.vizChildNodes }
     private var breadcrumbs: [BreadcrumbItem] { appState.vizBreadcrumbs }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Toolbar with mode switcher and breadcrumbs
-            toolbarBar
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.bar)
+        HSplitView {
+            // Folder tree sidebar
+            if let rootNode = rootTreeNode {
+                FolderTreeSidebar(
+                    rootNode: rootNode,
+                    selectedPath: appState.vizCurrentPath,
+                    onSelect: { node in
+                        navigateToPath(node.fileNode.path)
+                    },
+                    repository: appState.fileRepository
+                )
+            }
 
-            Divider()
+            // Main chart area
+            VStack(spacing: 0) {
+                // Toolbar with mode switcher and breadcrumbs
+                toolbarBar
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.bar)
 
-            // Visualization content
-            if isLoading {
-                ProgressView("Loading...")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if childNodes.isEmpty {
-                emptyState
-            } else {
-                visualizationContent
+                Divider()
+
+                // Visualization content
+                if isLoading {
+                    ProgressView("Loading...")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if childNodes.isEmpty {
+                    emptyState
+                } else {
+                    visualizationContent
+                }
             }
         }
         .task {
             if childNodes.isEmpty, case .completed = appState.scanState {
                 isLoading = true
                 await appState.loadVisualizationRoot()
+                await initTreeRoot()
                 isLoading = false
             }
         }
@@ -63,6 +80,7 @@ struct VisualizationContainer: View {
                     isLoading = true
                     appState.vizChildNodes = []
                     await appState.loadVisualizationRoot()
+                    await initTreeRoot()
                     isLoading = false
                 }
             }
@@ -119,6 +137,10 @@ struct VisualizationContainer: View {
                 Task {
                     isLoading = true
                     await appState.vizNavigateToRoot()
+                    // Sync tree: collapse to root
+                    if let rootTreeNode {
+                        rootTreeNode.isExpanded = true
+                    }
                     isLoading = false
                 }
             } label: {
@@ -138,6 +160,8 @@ struct VisualizationContainer: View {
                         Task {
                             isLoading = true
                             await appState.vizNavigateTo(crumb)
+                            // Sync tree to breadcrumb target
+                            await syncTreeToCurrentPath()
                             isLoading = false
                         }
                     }
@@ -167,14 +191,49 @@ struct VisualizationContainer: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    // MARK: - Navigation
+
+    private func navigateToPath(_ targetPath: String) {
+        Task {
+            isLoading = true
+            await appState.vizNavigateToPath(targetPath)
+            // Tree is already at the right place since user clicked in it
+            // But expand the node to show its children in the tree too
+            await syncTreeToCurrentPath()
+            isLoading = false
+        }
+    }
+
     private func drillDown(to node: FileNode) {
         guard node.isDirectory else { return }
 
         Task {
             isLoading = true
             await appState.vizDrillDown(to: node)
+            // Chart→tree sync: expand tree to the drilled-down path
+            await syncTreeToCurrentPath()
             isLoading = false
         }
+    }
+
+    // MARK: - Tree Management
+
+    private func initTreeRoot() async {
+        do {
+            if let root = try await appState.fileRepository.rootNode() {
+                let node = FolderTreeNode(fileNode: root, depth: 0)
+                await node.loadChildren(using: appState.fileRepository)
+                node.isExpanded = true
+                rootTreeNode = node
+            }
+        } catch {
+            rootTreeNode = nil
+        }
+    }
+
+    private func syncTreeToCurrentPath() async {
+        guard let rootTreeNode, let currentPath = appState.vizCurrentPath else { return }
+        await rootTreeNode.expandTo(targetPath: currentPath, using: appState.fileRepository)
     }
 }
 

@@ -262,6 +262,59 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Navigate to an arbitrary path, rebuilding breadcrumbs from the scan root down.
+    /// Used by the folder tree sidebar to jump multiple levels at once.
+    func vizNavigateToPath(_ targetPath: String) async {
+        guard let rootPath = try? await fileRepository.rootNode()?.path else { return }
+
+        // If navigating to root, just reset
+        if targetPath == rootPath {
+            await vizNavigateToRoot()
+            return
+        }
+
+        // Rebuild breadcrumbs from root to parent of target
+        var crumbs: [BreadcrumbItem] = []
+        let rootURL = URL(fileURLWithPath: rootPath)
+        let targetURL = URL(fileURLWithPath: targetPath)
+
+        // Walk from root to target, building ancestor breadcrumbs
+        var currentURL = rootURL
+        let rootName = scanRootPath?.lastPathComponent ?? rootURL.lastPathComponent
+        crumbs.append(BreadcrumbItem(id: rootPath, name: rootName, path: rootPath))
+
+        // Get relative path components from root to target
+        let rootStd = rootURL.standardizedFileURL.path
+        let targetStd = targetURL.standardizedFileURL.path
+        let prefix = rootStd.hasSuffix("/") ? rootStd : rootStd + "/"
+
+        if targetStd.hasPrefix(prefix) {
+            let relative = String(targetStd.dropFirst(prefix.count))
+            let components = relative.split(separator: "/")
+
+            // Add breadcrumbs for each ancestor (excluding the target itself)
+            for i in 0..<components.count {
+                currentURL = currentURL.appendingPathComponent(String(components[i]))
+                let ancestorPath = currentURL.path
+                if ancestorPath != targetPath {
+                    crumbs.append(BreadcrumbItem(
+                        id: ancestorPath,
+                        name: String(components[i]),
+                        path: ancestorPath
+                    ))
+                }
+            }
+        }
+
+        vizBreadcrumbs = crumbs
+        vizCurrentPath = targetPath
+        do {
+            vizChildNodes = try await fileRepository.childrenWithSizes(ofPath: targetPath)
+        } catch {
+            vizChildNodes = []
+        }
+    }
+
     func vizNavigateToRoot() async {
         vizBreadcrumbs = []
         vizChildNodes = []

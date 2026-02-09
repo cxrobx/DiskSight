@@ -40,6 +40,8 @@
 		FF66AA77BB88CC99DD000006 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000005 /* OnboardingView.swift */; };
 		FF66AA77BB88CC99DD000008 /* FileRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000007 /* FileRowView.swift */; };
 		AA22BB33CC44DD55EE660002 /* CSVExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA22BB33CC44DD55EE660001 /* CSVExporter.swift */; };
+		AB11CC22DD33EE44FF550002 /* FolderTreeNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB11CC22DD33EE44FF550001 /* FolderTreeNode.swift */; };
+		AB11CC22DD33EE44FF550004 /* FolderTreeSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB11CC22DD33EE44FF550003 /* FolderTreeSidebar.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -63,6 +65,8 @@
 		AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationContainer.swift; sourceTree = "<group>"; };
 		BB22CC33DD44EE55FF660001 /* SunburstView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SunburstView.swift; sourceTree = "<group>"; };
 		BB22CC33DD44EE55FF660003 /* IcicleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IcicleView.swift; sourceTree = "<group>"; };
+		AB11CC22DD33EE44FF550001 /* FolderTreeNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderTreeNode.swift; sourceTree = "<group>"; };
+		AB11CC22DD33EE44FF550003 /* FolderTreeSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderTreeSidebar.swift; sourceTree = "<group>"; };
 		CC33DD44EE55FF66AA770001 /* FileHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileHasher.swift; sourceTree = "<group>"; };
 		CC33DD44EE55FF66AA770004 /* DuplicateFinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicateFinder.swift; sourceTree = "<group>"; };
 		CC33DD44EE55FF66AA770007 /* DuplicatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicatesView.swift; sourceTree = "<group>"; };
@@ -236,6 +240,8 @@
 				AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */,
 				BB22CC33DD44EE55FF660001 /* SunburstView.swift */,
 				BB22CC33DD44EE55FF660003 /* IcicleView.swift */,
+				AB11CC22DD33EE44FF550001 /* FolderTreeNode.swift */,
+				AB11CC22DD33EE44FF550003 /* FolderTreeSidebar.swift */,
 			);
 			path = Visualization;
 			sourceTree = "<group>";
@@ -382,6 +388,8 @@
 				AA11BB22CC33DD44EE550006 /* VisualizationContainer.swift in Sources */,
 				BB22CC33DD44EE55FF660002 /* SunburstView.swift in Sources */,
 				BB22CC33DD44EE55FF660004 /* IcicleView.swift in Sources */,
+				AB11CC22DD33EE44FF550002 /* FolderTreeNode.swift in Sources */,
+				AB11CC22DD33EE44FF550004 /* FolderTreeSidebar.swift in Sources */,
 				CC33DD44EE55FF66AA770002 /* FileHasher.swift in Sources */,
 				CC33DD44EE55FF66AA770005 /* DuplicateFinder.swift in Sources */,
 				CC33DD44EE55FF66AA770008 /* DuplicatesView.swift in Sources */,

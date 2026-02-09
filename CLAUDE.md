@@ -48,6 +48,8 @@ Full list in `.claude/rules/architecture.md`
 | `FileScanner` | Async directory walker | `Services/Scanner/FileScanner.swift` |
 | `FSEventsMonitor` | C API bridge with debounce | `Services/Monitor/FSEventsMonitor.swift` |
 | `DuplicateFinder` | 3-stage hash pipeline | `Services/Analysis/DuplicateFinder.swift` |
+| `FolderTreeNode` | ObservableObject for tree state | `Views/Visualization/FolderTreeNode.swift` |
+| `FolderTreeSidebar` | Folder tree with lazy loading | `Views/Visualization/FolderTreeSidebar.swift` |
 
 ## Service Connections
 ```

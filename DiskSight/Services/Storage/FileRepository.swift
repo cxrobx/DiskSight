@@ -158,6 +158,17 @@ actor FileRepository {
         }
     }
 
+    func directoryChildren(ofPath path: String) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("parent_path") == path)
+                .filter(Column("is_directory") == true)
+                .filter(Column("size") > 0)
+                .order(Column("size").desc)
+                .fetchAll(db)
+        }
+    }
+
     func childrenWithSizes(ofPath path: String) throws -> [FileNode] {
         try database.dbPool.read { db in
             try FileNode
