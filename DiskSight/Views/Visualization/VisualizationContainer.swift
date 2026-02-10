@@ -77,11 +77,16 @@ struct VisualizationContainer: View {
         .onChange(of: appState.scanState) { _, newState in
             if case .completed = newState {
                 Task {
-                    isLoading = true
-                    appState.vizChildNodes = []
                     await appState.loadVisualizationRoot()
                     await initTreeRoot()
-                    isLoading = false
+                }
+            }
+        }
+        .onChange(of: childNodes.isEmpty) { _, isEmpty in
+            // Reload after FSEvents cache invalidation clears vizChildNodes
+            if isEmpty, case .completed = appState.scanState {
+                Task {
+                    await appState.loadVisualizationRoot()
                 }
             }
         }
@@ -135,13 +140,11 @@ struct VisualizationContainer: View {
         HStack(spacing: 4) {
             Button {
                 Task {
-                    isLoading = true
                     await appState.vizNavigateToRoot()
                     // Sync tree: collapse to root
                     if let rootTreeNode {
                         rootTreeNode.isExpanded = true
                     }
-                    isLoading = false
                 }
             } label: {
                 Image(systemName: "house.fill")
@@ -158,11 +161,8 @@ struct VisualizationContainer: View {
 
                     Button(crumb.name) {
                         Task {
-                            isLoading = true
                             await appState.vizNavigateTo(crumb)
-                            // Sync tree to breadcrumb target
                             await syncTreeToCurrentPath()
-                            isLoading = false
                         }
                     }
                     .buttonStyle(.borderless)
@@ -195,12 +195,8 @@ struct VisualizationContainer: View {
 
     private func navigateToPath(_ targetPath: String) {
         Task {
-            isLoading = true
             await appState.vizNavigateToPath(targetPath)
-            // Tree is already at the right place since user clicked in it
-            // But expand the node to show its children in the tree too
             await syncTreeToCurrentPath()
-            isLoading = false
         }
     }
 
@@ -208,11 +204,8 @@ struct VisualizationContainer: View {
         guard node.isDirectory else { return }
 
         Task {
-            isLoading = true
             await appState.vizDrillDown(to: node)
-            // Chart→tree sync: expand tree to the drilled-down path
             await syncTreeToCurrentPath()
-            isLoading = false
         }
     }
 

@@ -10,6 +10,9 @@ struct TreemapView: View {
     @State private var tooltipPosition: CGPoint = .zero
     @State private var currentRects: [TreemapRect] = []
 
+    /// Lightweight identity — changes on every navigation, even when count stays the same
+    private var nodesIdentity: String { "\(nodes.count)|\(nodes.first?.path ?? "")" }
+
     var body: some View {
         GeometryReader { geometry in
             let rects = TreemapAlgorithm.layout(
@@ -93,8 +96,10 @@ struct TreemapView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .onChange(of: nodes.count) {
+            .onChange(of: nodesIdentity) {
                 currentRects = rects
+                hoveredId = nil
+                tooltipNode = nil
             }
             .onAppear {
                 currentRects = rects

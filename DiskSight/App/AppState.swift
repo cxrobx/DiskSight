@@ -8,6 +8,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case duplicates = "Duplicates"
     case staleFiles = "Stale Files"
     case cache = "Cache"
+    case smartCleanup = "Smart Cleanup"
 
     var id: String { rawValue }
 
@@ -18,6 +19,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .duplicates: return "doc.on.doc"
         case .staleFiles: return "clock.arrow.circlepath"
         case .cache: return "internaldrive"
+        case .smartCleanup: return "wand.and.stars"
         }
     }
 }
@@ -77,17 +79,43 @@ final class AppState: ObservableObject {
     // Cache
     @Published var detectedCaches: [DetectedCache]?
 
+    // Smart Cleanup
+    @Published var cleanupRecommendations: [CleanupRecommendation]?
+    @Published var cleanupSummary: CleanupSummary?
+    @Published var cleanupProgress: ClassificationProgress?
+    @Published var isAnalyzingCleanup: Bool = false
+    @Published var isOllamaAvailable: Bool = false
+    @Published var ollamaModels: [String] = []
+    @Published var selectedOllamaModel: String = ""
+
     private var scanTask: Task<Void, Never>?
     private let database: Database
     let fileRepository: FileRepository
     private var fsMonitor: FSEventsMonitor?
     private var eventCancellable: AnyCancellable?
+    private var rescanCancellable: AnyCancellable?
+    private var terminationObserver: Any?
 
     init() {
         self.database = Database.shared
         self.fileRepository = FileRepository(database: database)
         checkFullDiskAccess()
         loadLastSession()
+
+        // Save event ID synchronously on app quit — can't await in notification handlers
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.saveEventIdSync()
+        }
+    }
+
+    deinit {
+        if let observer = terminationObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     func checkFullDiskAccess() {
@@ -141,15 +169,34 @@ final class AppState: ObservableObject {
         let monitor = FSEventsMonitor(repository: fileRepository)
         self.fsMonitor = monitor
 
-        // Subscribe to events for UI updates + cache invalidation
+        // Subscribe to events for UI updates + cache invalidation + event ID persistence
         eventCancellable = monitor.eventSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] event in
-                self?.recentEvents.insert(event, at: 0)
-                if (self?.recentEvents.count ?? 0) > 50 {
-                    self?.recentEvents = Array(self?.recentEvents.prefix(50) ?? [])
+                guard let self else { return }
+                self.recentEvents.insert(event, at: 0)
+                if self.recentEvents.count > 50 {
+                    self.recentEvents = Array(self.recentEvents.prefix(50))
                 }
-                self?.invalidateCache()
+                self.invalidateCache()
+
+                // Persist event ID on each debounced batch so crash recovery
+                // loses at most the last 2-second window
+                if let session = self.lastScanSession, let sessionId = session.id {
+                    Task {
+                        try? await self.fileRepository.updateEventId(
+                            sessionId: sessionId,
+                            eventId: Int64(event.eventId)
+                        )
+                    }
+                }
+            }
+
+        // Subscribe to rescan requests (MustScanSubDirs)
+        rescanCancellable = monitor.rescanSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.triggerQuickRescan()
             }
 
         // Resume from last event ID if available
@@ -160,23 +207,59 @@ final class AppState: ObservableObject {
             sinceId = UInt64(kFSEventStreamEventIdSinceNow)
         }
 
+        // Check for stale event ID: if scan completed >7 days ago, the FSEvents
+        // journal may have expired. Trigger a rescan instead of replaying from
+        // a potentially invalid event ID.
+        if let completedAt = lastScanSession?.completedAt {
+            let sevenDaysAgo = Date().timeIntervalSince1970 - (7 * 24 * 60 * 60)
+            if completedAt < sevenDaysAgo {
+                triggerQuickRescan()
+                return
+            }
+        }
+
         monitor.start(path: path, sinceEventId: sinceId)
         isMonitoring = true
     }
 
     func stopMonitoring() {
-        // Save current event ID before stopping
-        if let monitor = fsMonitor, let session = lastScanSession, let sessionId = session.id {
-            let eventId = monitor.currentEventId
-            Task {
-                try? await fileRepository.updateEventId(sessionId: sessionId, eventId: Int64(eventId))
-            }
-        }
+        // Save current event ID synchronously before stopping
+        saveEventIdSync()
 
         fsMonitor?.stop()
         fsMonitor = nil
         eventCancellable = nil
+        rescanCancellable = nil
         isMonitoring = false
+    }
+
+    /// Synchronous event ID save — safe to call from notification handlers and deinit
+    nonisolated func saveEventIdSync() {
+        // Access MainActor-isolated properties requires careful handling.
+        // We capture what we need assuming this is called from main thread contexts
+        // (willTerminate, stopMonitoring). The nonisolated attribute is needed for
+        // the notification handler signature.
+        MainActor.assumeIsolated {
+            guard let monitor = fsMonitor, let session = lastScanSession, let sessionId = session.id else { return }
+            let eventId = monitor.currentEventId
+            fileRepository.updateEventIdSync(sessionId: sessionId, eventId: Int64(eventId))
+        }
+    }
+
+    /// Trigger a full rescan of the monitored path. Called when MustScanSubDirs
+    /// is detected or when the saved event ID is likely stale.
+    private func triggerQuickRescan() {
+        guard let rootPath = scanRootPath else { return }
+        startScan(at: rootPath)
+    }
+
+    /// Called when the app returns to the foreground. Restarts monitoring if
+    /// the FSEvents stream died. Cache invalidation happens naturally via
+    /// the FSEvents sink when real changes are detected.
+    func handleBecameActive() {
+        if let rootPath = lastScanSession?.rootPath, !(fsMonitor?.running ?? false) {
+            startMonitoring(path: rootPath)
+        }
     }
 
     // MARK: - Export
@@ -221,7 +304,11 @@ final class AppState: ObservableObject {
     func loadVisualizationRoot() async {
         guard vizChildNodes.isEmpty else { return }
         do {
-            if let root = try await fileRepository.rootNode() {
+            if let currentPath = vizCurrentPath {
+                // Reload data for current drill-down position (preserves navigation after cache invalidation)
+                vizChildNodes = try await fileRepository.childrenWithSizes(ofPath: currentPath)
+            } else if let root = try await fileRepository.rootNode() {
+                // First load — navigate to root
                 vizCurrentPath = root.path
                 vizChildNodes = try await fileRepository.childrenWithSizes(ofPath: root.path)
                 vizBreadcrumbs = []
@@ -317,7 +404,6 @@ final class AppState: ObservableObject {
 
     func vizNavigateToRoot() async {
         vizBreadcrumbs = []
-        vizChildNodes = []
         vizCurrentPath = nil
         await loadVisualizationRoot()
     }
@@ -335,16 +421,114 @@ final class AppState: ObservableObject {
         detectedCaches = (try? await detector.detectCaches()) ?? []
     }
 
+    // MARK: - Smart Cleanup
+
+    func loadSmartCleanup() async {
+        guard cleanupRecommendations == nil else { return }
+        guard let session = lastScanSession, let sessionId = session.id else { return }
+        do {
+            let records = try await fileRepository.recommendations(forSession: sessionId)
+            guard !records.isEmpty else { return } // Leave nil so view shows "Analyze" prompt
+            cleanupRecommendations = records.map { $0.toRecommendation() }
+            cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
+        } catch {}
+    }
+
+    func runSmartCleanup(useLLM: Bool = false) async {
+        guard let session = lastScanSession, let sessionId = session.id else { return }
+        isAnalyzingCleanup = true
+        cleanupRecommendations = nil
+        cleanupSummary = nil
+
+        do {
+            // Clear previous recommendations
+            try await fileRepository.deleteRecommendations(forSession: sessionId)
+
+            let service = SmartCleanupService(
+                classifier: FileClassifier(),
+                repository: fileRepository,
+                ollamaClient: useLLM ? OllamaClient() : nil
+            )
+
+            var allRecs: [CleanupRecommendation] = []
+            let stream = await service.analyze(sessionId: sessionId, useLLM: useLLM)
+            for await (progress, recs) in stream {
+                cleanupProgress = progress
+                allRecs.append(contentsOf: recs)
+            }
+
+            // Persist to DB
+            let records = allRecs.map { CleanupRecommendationRecord.from($0) }
+            let batchSize = 500
+            for batchStart in stride(from: 0, to: records.count, by: batchSize) {
+                let batchEnd = min(batchStart + batchSize, records.count)
+                try await fileRepository.insertRecommendations(Array(records[batchStart..<batchEnd]))
+            }
+
+            cleanupRecommendations = allRecs
+            cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
+        } catch {}
+
+        isAnalyzingCleanup = false
+        cleanupProgress = nil
+    }
+
+    func checkOllamaStatus() async {
+        let client = OllamaClient()
+        let status = await client.checkAvailability()
+        switch status {
+        case .available(let models):
+            isOllamaAvailable = true
+            ollamaModels = models
+            if selectedOllamaModel.isEmpty, let first = models.first {
+                selectedOllamaModel = first
+            }
+        case .unavailable:
+            isOllamaAvailable = false
+            ollamaModels = []
+        }
+    }
+
+    func trashCleanupFile(at path: String) async {
+        let url = URL(fileURLWithPath: path)
+        try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        try? await fileRepository.deleteFile(path: path)
+
+        // Remove from local recommendations
+        cleanupRecommendations?.removeAll { $0.filePath == path }
+        if let session = lastScanSession, let sessionId = session.id {
+            cleanupSummary = try? await fileRepository.recommendationSummary(forSession: sessionId)
+        }
+        invalidateCache()
+    }
+
+    func trashAllSafeCleanup() async {
+        guard let recs = cleanupRecommendations?.filter({ $0.confidence == .safe }) else { return }
+        for rec in recs {
+            let url = URL(fileURLWithPath: rec.filePath)
+            try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            try? await fileRepository.deleteFile(path: rec.filePath)
+        }
+        cleanupRecommendations?.removeAll { $0.confidence == .safe }
+        if let session = lastScanSession, let sessionId = session.id {
+            cleanupSummary = try? await fileRepository.recommendationSummary(forSession: sessionId)
+        }
+        invalidateCache()
+    }
+
     func invalidateCache() {
         overviewFileCount = nil
         overviewTotalSize = nil
         overviewTopFolders = nil
         vizChildNodes = []
-        vizCurrentPath = nil
-        vizBreadcrumbs = []
+        // Preserve vizCurrentPath and vizBreadcrumbs — these are navigation
+        // state, not cached data. Clearing them loses the user's drill-down
+        // position with no way to restore it (`.task` won't re-fire).
         duplicateGroups = nil
         staleFiles = nil
         detectedCaches = nil
+        cleanupRecommendations = nil
+        cleanupSummary = nil
     }
 
     private func loadLastSession() {

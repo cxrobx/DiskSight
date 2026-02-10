@@ -12,6 +12,8 @@ struct SunburstView: View {
     @State private var center: CGPoint = .zero
     @State private var maxRadius: CGFloat = 0
 
+    private var nodesIdentity: String { "\(nodes.count)|\(nodes.first?.path ?? "")" }
+
     var body: some View {
         GeometryReader { geometry in
             let c = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
@@ -41,6 +43,48 @@ struct SunburstView: View {
                     context.fill(Path(path), with: .color(fillColor))
                     let strokeColor: Color = colorScheme == .dark ? .white.opacity(0.15) : .black.opacity(0.3)
                     context.stroke(Path(path), with: .color(strokeColor), lineWidth: 0.5)
+                }
+
+                // Draw labels for segments large enough to fit text
+                for arc in arcs {
+                    let sweep = arc.endAngle - arc.startAngle
+                    let midRadius = (arc.innerRadius + arc.outerRadius) / 2
+                    let arcLength = midRadius * sweep
+
+                    guard arcLength > 50 else { continue }
+
+                    let midAngle = (arc.startAngle + arc.endAngle) / 2
+                    let labelX = c.x + midRadius * cos(midAngle)
+                    let labelY = c.y + midRadius * sin(midAngle)
+
+                    // Text tangent to the arc, flipped if upside down
+                    var textAngle = midAngle + .pi / 2
+                    if cos(textAngle) < 0 {
+                        textAngle += .pi
+                    }
+
+                    // Truncate name to fit arc (~8px per char at 11pt)
+                    let name = arc.node.name
+                    let maxChars = max(3, Int(arcLength / 8))
+                    let displayName: String
+                    if name.count > maxChars {
+                        displayName = String(name.prefix(maxChars - 1)) + "…"
+                    } else {
+                        displayName = name
+                    }
+
+                    let fontSize = min(CGFloat(12), (arc.outerRadius - arc.innerRadius) * 0.45)
+                    let text = Text(displayName)
+                        .font(.system(size: fontSize, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    var labelCtx = context
+                    labelCtx.translateBy(x: labelX, y: labelY)
+                    labelCtx.rotate(by: .radians(textAngle))
+                    labelCtx.addFilter(.shadow(color: .black.opacity(0.8), radius: 2, x: 0, y: 0))
+
+                    let resolved = labelCtx.resolve(text)
+                    labelCtx.draw(resolved, at: .zero, anchor: .center)
                 }
             }
             .onContinuousHover { phase in
@@ -81,10 +125,12 @@ struct SunburstView: View {
                     }
                 }
             }
-            .onChange(of: nodes.count) {
+            .onChange(of: nodesIdentity) {
                 currentArcs = arcs
                 center = c
                 maxRadius = r
+                hoveredPath = nil
+                tooltipNode = nil
             }
             .onAppear {
                 currentArcs = arcs

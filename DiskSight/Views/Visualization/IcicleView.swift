@@ -10,6 +10,8 @@ struct IcicleView: View {
     @State private var tooltipPosition: CGPoint = .zero
     @State private var currentRects: [IcicleRect] = []
 
+    private var nodesIdentity: String { "\(nodes.count)|\(nodes.first?.path ?? "")" }
+
     var body: some View {
         GeometryReader { geometry in
             let rects = IcicleLayout.layout(
@@ -90,8 +92,10 @@ struct IcicleView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .onChange(of: nodes.count) {
+            .onChange(of: nodesIdentity) {
                 currentRects = rects
+                hoveredPath = nil
+                tooltipNode = nil
             }
             .onAppear {
                 currentRects = rects
