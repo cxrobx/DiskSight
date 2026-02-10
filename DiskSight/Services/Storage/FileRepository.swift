@@ -152,8 +152,14 @@ actor FileRepository {
 
     func rootNode() throws -> FileNode? {
         try database.dbPool.read { db in
+            // Primary: parent_path IS NULL (normal case)
+            // Fallback: FSEvents can overwrite root's parent_path to "/.."
             try FileNode
                 .filter(Column("parent_path") == nil)
+                .fetchOne(db)
+            ?? FileNode
+                .filter(Column("parent_path") == "/..")
+                .filter(Column("is_directory") == true)
                 .fetchOne(db)
         }
     }
@@ -294,6 +300,23 @@ actor FileRepository {
         }
     }
 
+    /// Batch delete files by path — much faster than N individual deletes.
+    /// Also removes children of deleted directories to handle rm -rf correctly.
+    func deleteFiles(paths: [String]) throws {
+        guard !paths.isEmpty else { return }
+        try database.dbPool.write { db in
+            for chunk in stride(from: 0, to: paths.count, by: 500) {
+                let end = min(chunk + 500, paths.count)
+                let batch = Array(paths[chunk..<end])
+                let placeholders = batch.map { _ in "?" }.joined(separator: ",")
+                try db.execute(
+                    sql: "DELETE FROM files WHERE path IN (\(placeholders))",
+                    arguments: StatementArguments(batch)
+                )
+            }
+        }
+    }
+
     // MARK: - Stale Files
 
     func staleFiles(accessedBefore cutoff: Double, minSize: Int64 = 1_048_576) throws -> [FileNode] {
@@ -344,11 +367,94 @@ actor FileRepository {
         }
     }
 
+    // MARK: - Concurrent Read Access
+
+    /// Nonisolated read methods that bypass actor serialization for read-only queries.
+    /// Safe because Database is Sendable, `database` is a `let` property, and
+    /// DatabasePool.read supports concurrent reads with writes.
+    /// This prevents visualization reads from blocking behind FSEvents write batches.
+
+    nonisolated func rootNodeConcurrent() throws -> FileNode? {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("parent_path") == nil)
+                .fetchOne(db)
+            ?? FileNode
+                .filter(Column("parent_path") == "/..")
+                .filter(Column("is_directory") == true)
+                .fetchOne(db)
+        }
+    }
+
+    nonisolated func childrenWithSizesConcurrent(ofPath path: String) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("parent_path") == path)
+                .filter(Column("size") > 0)
+                .order(Column("size").desc)
+                .fetchAll(db)
+        }
+    }
+
+    nonisolated func directoryChildrenConcurrent(ofPath path: String) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("parent_path") == path)
+                .filter(Column("is_directory") == true)
+                .filter(Column("size") > 0)
+                .order(Column("size").desc)
+                .fetchAll(db)
+        }
+    }
+
     // MARK: - FSEvents
 
     func updateEventId(sessionId: Int64, eventId: Int64) throws {
         try database.dbPool.write { db in
             try db.execute(sql: "UPDATE scan_sessions SET last_fsevents_id = ? WHERE id = ?", arguments: [eventId, sessionId])
+        }
+    }
+
+    /// Synchronous, nonisolated event ID save for use in app termination handlers
+    /// where async/await is not available. Safe because Database is Sendable and
+    /// DatabasePool is thread-safe.
+    nonisolated func updateEventIdSync(sessionId: Int64, eventId: Int64) {
+        try? database.dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE scan_sessions SET last_fsevents_id = ? WHERE id = ?",
+                arguments: [eventId, sessionId]
+            )
+        }
+    }
+
+    /// Recalculate directory sizes from the given path up to the root.
+    /// Called after FSEvents incremental file changes to keep parent sizes accurate.
+    func updateAncestorSizes(forPaths paths: Set<String>) throws {
+        // Collect unique ancestor directories from all changed paths
+        var ancestors = Set<String>()
+        for path in paths {
+            var current = (path as NSString).deletingLastPathComponent
+            while !current.isEmpty && current != "/" {
+                if !ancestors.insert(current).inserted { break } // already have this and all its parents
+                let parent = (current as NSString).deletingLastPathComponent
+                if parent == current { break }
+                current = parent
+            }
+        }
+
+        guard !ancestors.isEmpty else { return }
+
+        // Sort deepest first so children are updated before parents
+        let sorted = ancestors.sorted { $0.components(separatedBy: "/").count > $1.components(separatedBy: "/").count }
+
+        try database.dbPool.write { db in
+            for dirPath in sorted {
+                try db.execute(sql: """
+                    UPDATE files SET size = (
+                        SELECT COALESCE(SUM(f2.size), 0) FROM files f2 WHERE f2.parent_path = ?
+                    ) WHERE path = ? AND is_directory = 1
+                    """, arguments: [dirPath, dirPath])
+            }
         }
     }
 
@@ -372,6 +478,127 @@ actor FileRepository {
                 .order(Column("size").desc)
                 .limit(limit)
                 .fetchAll(db)
+        }
+    }
+
+    // MARK: - Smart Cleanup
+
+    func nonDirectoryFiles(forSession sessionId: Int64) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("scan_session_id") == sessionId)
+                .filter(Column("is_directory") == false)
+                .fetchAll(db)
+        }
+    }
+
+    func nonDirectoryFileCount(forSession sessionId: Int64) throws -> Int {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("scan_session_id") == sessionId)
+                .filter(Column("is_directory") == false)
+                .fetchCount(db)
+        }
+    }
+
+    func nonDirectoryFiles(forSession sessionId: Int64, limit: Int, offset: Int) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("scan_session_id") == sessionId)
+                .filter(Column("is_directory") == false)
+                .limit(limit, offset: offset)
+                .fetchAll(db)
+        }
+    }
+
+    func insertRecommendations(_ records: [CleanupRecommendationRecord]) throws {
+        try database.dbPool.write { db in
+            for var record in records {
+                try record.insert(db)
+            }
+        }
+    }
+
+    func recommendations(forSession sessionId: Int64) throws -> [CleanupRecommendationRecord] {
+        try database.dbPool.read { db in
+            try CleanupRecommendationRecord
+                .filter(Column("scan_session_id") == sessionId)
+                .order(Column("confidence").asc, Column("file_size").desc)
+                .fetchAll(db)
+        }
+    }
+
+    func recommendations(forSession sessionId: Int64, confidence: String) throws -> [CleanupRecommendationRecord] {
+        try database.dbPool.read { db in
+            try CleanupRecommendationRecord
+                .filter(Column("scan_session_id") == sessionId)
+                .filter(Column("confidence") == confidence)
+                .order(Column("file_size").desc)
+                .fetchAll(db)
+        }
+    }
+
+    func deleteRecommendations(forSession sessionId: Int64) throws {
+        try database.dbPool.write { db in
+            try db.execute(
+                sql: "DELETE FROM cleanup_recommendations WHERE scan_session_id = ?",
+                arguments: [sessionId]
+            )
+        }
+    }
+
+    func recommendationSummary(forSession sessionId: Int64) throws -> CleanupSummary {
+        try database.dbPool.read { db in
+            // Total by confidence
+            let confidenceRows = try Row.fetchAll(db, sql: """
+                SELECT confidence, COALESCE(SUM(file_size), 0) as total_size, COUNT(*) as count
+                FROM cleanup_recommendations WHERE scan_session_id = ?
+                GROUP BY confidence
+                """, arguments: [sessionId])
+
+            var totalReclaimable: Int64 = 0
+            var safeReclaimable: Int64 = 0
+            var cautionReclaimable: Int64 = 0
+            var riskyReclaimable: Int64 = 0
+            var totalCount = 0
+
+            for row in confidenceRows {
+                let conf: String = row["confidence"]
+                let size: Int64 = row["total_size"]
+                let count: Int = row["count"]
+                totalReclaimable += size
+                totalCount += count
+                switch conf {
+                case "safe": safeReclaimable = size
+                case "caution": cautionReclaimable = size
+                case "risky": riskyReclaimable = size
+                default: break
+                }
+            }
+
+            // Category breakdown
+            let categoryRows = try Row.fetchAll(db, sql: """
+                SELECT category, COALESCE(SUM(file_size), 0) as total_size, COUNT(*) as count
+                FROM cleanup_recommendations WHERE scan_session_id = ?
+                GROUP BY category ORDER BY total_size DESC
+                """, arguments: [sessionId])
+
+            let categoryBreakdown: [(FileCategoryType, Int64, Int)] = categoryRows.compactMap { row in
+                let cat: String = row["category"]
+                let size: Int64 = row["total_size"]
+                let count: Int = row["count"]
+                guard let categoryType = FileCategoryType(rawValue: cat) else { return nil }
+                return (categoryType, size, count)
+            }
+
+            return CleanupSummary(
+                totalReclaimable: totalReclaimable,
+                safeReclaimable: safeReclaimable,
+                cautionReclaimable: cautionReclaimable,
+                riskyReclaimable: riskyReclaimable,
+                categoryBreakdown: categoryBreakdown,
+                totalCount: totalCount
+            )
         }
     }
 }

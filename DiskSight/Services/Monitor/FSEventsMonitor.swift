@@ -12,7 +12,13 @@ final class FSEventsMonitor: @unchecked Sendable {
     private var isRunning = false
     private var monitoredPath: String?
 
+    /// Individual events for UI event log (collected/throttled by subscriber)
     let eventSubject = PassthroughSubject<FSEventInfo, Never>()
+    /// Published when MustScanSubDirs is detected — subscribers should trigger a full rescan
+    let rescanSubject = PassthroughSubject<Void, Never>()
+    /// Fires once after a debounced batch of events has been fully processed in DB.
+    /// Sends the count of paths that were processed.
+    let batchProcessedSubject = PassthroughSubject<Int, Never>()
 
     init(repository: FileRepository, debounceInterval: TimeInterval = 2.0) {
         self.repository = repository
@@ -67,6 +73,15 @@ final class FSEventsMonitor: @unchecked Sendable {
     // MARK: - Event Processing
 
     fileprivate func handleEvents(paths: [String], flags: [UInt32], ids: [UInt64]) {
+        // Check for MustScanSubDirs — macOS can't guarantee individual events,
+        // so we need to trigger a full rescan instead of processing individual paths
+        for flag in flags {
+            if flag & UInt32(kFSEventStreamEventFlagMustScanSubDirs) != 0 {
+                rescanSubject.send()
+                return
+            }
+        }
+
         lock.lock()
         for path in paths {
             pendingPaths.insert(path)
@@ -81,7 +96,7 @@ final class FSEventsMonitor: @unchecked Sendable {
             }
         }
 
-        // Publish events for UI
+        // Publish events for UI (subscriber collects these in time windows)
         for (i, path) in paths.enumerated() {
             let flag = flags[i]
             let eventType: FSEventType
@@ -110,42 +125,50 @@ final class FSEventsMonitor: @unchecked Sendable {
         guard !paths.isEmpty else { return }
 
         Task {
-            for path in paths {
-                await processPath(path)
-            }
-        }
-    }
+            let fm = FileManager.default
+            var upsertNodes: [FileNode] = []
+            var deletePaths: [String] = []
 
-    private func processPath(_ path: String) async {
-        let url = URL(fileURLWithPath: path)
-        let fm = FileManager.default
-
-        if fm.fileExists(atPath: path) {
-            // Create or update
             let resourceKeys: Set<URLResourceKey> = [
                 .fileSizeKey, .isDirectoryKey,
                 .contentModificationDateKey, .contentAccessDateKey,
                 .creationDateKey, .typeIdentifierKey
             ]
 
-            guard let values = try? url.resourceValues(forKeys: resourceKeys) else { return }
+            // Classify paths into upserts vs deletes
+            for path in paths {
+                if fm.fileExists(atPath: path) {
+                    let url = URL(fileURLWithPath: path)
+                    guard let values = try? url.resourceValues(forKeys: resourceKeys) else { continue }
+                    upsertNodes.append(FileNode(
+                        path: path,
+                        name: url.lastPathComponent,
+                        parentPath: path == "/" ? nil : url.deletingLastPathComponent().path,
+                        size: Int64(values.fileSize ?? 0),
+                        isDirectory: values.isDirectory ?? false,
+                        modifiedAt: values.contentModificationDate?.timeIntervalSince1970,
+                        accessedAt: values.contentAccessDate?.timeIntervalSince1970,
+                        createdAt: values.creationDate?.timeIntervalSince1970,
+                        fileType: values.typeIdentifier
+                    ))
+                } else {
+                    deletePaths.append(path)
+                }
+            }
 
-            let node = FileNode(
-                path: path,
-                name: url.lastPathComponent,
-                parentPath: url.deletingLastPathComponent().path,
-                size: Int64(values.fileSize ?? 0),
-                isDirectory: values.isDirectory ?? false,
-                modifiedAt: values.contentModificationDate?.timeIntervalSince1970,
-                accessedAt: values.contentAccessDate?.timeIntervalSince1970,
-                createdAt: values.creationDate?.timeIntervalSince1970,
-                fileType: values.typeIdentifier
-            )
+            // Batch DB operations (single DELETE query per 500 instead of N individual calls)
+            if !deletePaths.isEmpty {
+                try? await repository.deleteFiles(paths: deletePaths)
+            }
+            if !upsertNodes.isEmpty {
+                try? await repository.insertFilesBatch(upsertNodes)
+            }
 
-            try? await repository.insertFilesBatch([node])
-        } else {
-            // Deleted
-            try? await repository.deleteFile(path: path)
+            // Recalculate ancestor directory sizes for all affected paths
+            try? await repository.updateAncestorSizes(forPaths: paths)
+
+            // Signal batch complete — AppState subscribes to this for cache invalidation
+            batchProcessedSubject.send(paths.count)
         }
     }
 }

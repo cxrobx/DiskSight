@@ -21,6 +21,11 @@ struct SettingsView: View {
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
     @AppStorage("monitoringEnabled") private var monitoringEnabled = true
     @AppStorage("staleThreshold") private var staleThreshold: String = StaleThreshold.oneYear.rawValue
+    @AppStorage("llmEnabled") private var llmEnabled = false
+    @AppStorage("ollamaURL") private var ollamaURL = "http://localhost:11434"
+    @AppStorage("ollamaModel") private var ollamaModel = ""
+    @State private var ollamaTestResult: String?
+    @State private var isTesting = false
 
     var body: some View {
         Form {
@@ -55,12 +60,65 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Smart Cleanup") {
+                Toggle("Enable LLM enhancement", isOn: $llmEnabled)
+                Text("Use a local Ollama model for enhanced file explanations")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if llmEnabled {
+                    TextField("Ollama URL", text: $ollamaURL)
+                        .textFieldStyle(.roundedBorder)
+
+                    TextField("Model name", text: $ollamaModel)
+                        .textFieldStyle(.roundedBorder)
+
+                    HStack {
+                        Button {
+                            testConnection()
+                        } label: {
+                            if isTesting {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Text("Test Connection")
+                            }
+                        }
+                        .disabled(isTesting)
+
+                        if let result = ollamaTestResult {
+                            Text(result)
+                                .font(.caption)
+                                .foregroundStyle(result.contains("Connected") ? .green : .red)
+                        }
+                    }
+                }
+            }
+
             Section("About") {
                 LabeledContent("Version", value: "1.0.0")
                 LabeledContent("Build", value: "1")
             }
         }
         .formStyle(.grouped)
-        .frame(width: 450, height: 400)
+        .frame(width: 450, height: 500)
+    }
+
+    private func testConnection() {
+        isTesting = true
+        ollamaTestResult = nil
+        Task {
+            let client = OllamaClient(baseURL: ollamaURL)
+            let status = await client.checkAvailability()
+            await MainActor.run {
+                switch status {
+                case .available(let models):
+                    ollamaTestResult = "Connected — \(models.count) model(s) available"
+                case .unavailable:
+                    ollamaTestResult = "Connection failed — is Ollama running?"
+                }
+                isTesting = false
+            }
+        }
     }
 }

@@ -1,114 +1,117 @@
 # Known Gotchas
 
-Organized by category. 11 items, condensed format. Original numbering preserved (gaps intentional).
-
-## Index
-
-| # | Issue | Category |
-|---|-------|----------|
-| 1 | GRDB 7.x insert returns nil ID | Database |
-| 2 | SourceKit cross-file diagnostics are noise | Build |
-| 3 | Linter modifies files between reads | Build |
-| 4 | ForEach + .position() breaks hit testing | Frontend |
-| 5 | .skipsHiddenFiles hides ~450GB of data | Scanner |
-| 6 | Single-pass directory sizes are wrong | Database |
-| 7 | ScanSession.completedAt nil check required | Database |
-| 8 | FSEvents invalidates all cached view data | Architecture |
-| 9 | View computed properties are read-only | Frontend |
-| 10 | .foregroundColor doesn't accept ShapeStyle | Frontend |
-| 11 | .task doesn't re-fire after scan completes | Architecture |
-
-Standard categories: Database, Build, Frontend, Scanner, Architecture
+26 items. **By category**: DB (1,6,7,18,23), Build (2,3,12,13), Frontend (4,9,10,20,21,25), Scanner (5), Arch (8,11,14-17,19,22,24,26)
 
 ---
 
 ## Database
 
 ### 1. GRDB 7.x Insert Returns nil ID
-**Symptom**: `ScanSession.id` is nil after insert, causing crash on force unwrap
-**Cause**: GRDB 7.x changed insert behavior; `didInsert` callback may not fire as expected
-**Solution**: Use `db.lastInsertedRowID` fallback in `createScanSession`. Remove all force unwraps on session IDs.
-**Pattern**: `DiskSight/Services/Storage/FileRepository.swift`
+`ScanSession.id` nil after insert — use `db.lastInsertedRowID` fallback.
 
 ### 6. Single-Pass Directory Sizes Are Wrong
-**Symptom**: Directory sizes only reflect immediate children, not recursive contents
-**Cause**: Original `calculateDirectorySizes` did one pass summing only direct children
-**Solution**: Multi-pass bottom-up propagation (up to 30 passes) in `calculateDirectorySizes`
-**Pattern**: `DiskSight/Services/Storage/FileRepository.swift`
+Fix: multi-pass bottom-up propagation (up to 30 passes).
 
-### 7. ScanSession.completedAt Nil Check Required
-**Symptom**: App shows "Scan Complete" when no scan has actually finished
-**Cause**: `loadLastSession` was setting `.completed` state without checking `completedAt`
-**Solution**: Only set `.completed` when `session.completedAt != nil`
-**Pattern**: `DiskSight/App/AppState.swift:loadLastSession`
+### 7. ScanSession.completedAt Nil Check
+`loadLastSession` must check `session.completedAt != nil` before setting `.completed` state.
 
 ---
 
 ## Build
 
 ### 2. SourceKit Cross-File Diagnostics Are Noise
-**Symptom**: Red errors in editor like "Cannot find type 'FileNode' in scope"
-**Cause**: SourceKit can't resolve types across files during incremental editing
-**Solution**: Ignore SourceKit errors. Trust `xcodebuild` — if it compiles, the types resolve.
+Red errors like "Cannot find type 'FileNode' in scope" — ignore, trust `xcodebuild`.
 
 ### 3. Linter Modifies Files Between Reads
-**Symptom**: Edit tool fails with "File has been modified since read"
-**Cause**: A linter or formatter auto-modifies Swift files after saves
-**Solution**: Always re-read a file immediately before editing it. Don't batch reads then edits.
+Always re-read a file immediately before editing. Don't batch reads then edits.
+
+### 12. macOS Icons Don't Auto-Mask Like iOS
+Bake rounded rect into image (~80% of 1024, radius ~185px, drop shadow). Generate all sizes 16-1024 with 1x/2x scales.
+
+### 13. xcodebuild Clean After Icon Changes
+Xcode caches icon assets aggressively. Run `xcodebuild clean` after replacing icon assets.
 
 ---
 
 ## Frontend
 
+### 4. ForEach + .position() Breaks Hit Testing
+Use `onContinuousHover` + manual rect/arc containment. Use `SpatialTapGesture` for clicks.
+
 ### 9. View Computed Properties Are Read-Only
-**Symptom**: Build error "cannot assign to property: 'xxx' is a get-only property"
-**Cause**: When state is lifted from local `@State` to AppState, view properties become computed (`var foo: T { appState.foo ?? default }`). Old methods that assigned to these local vars break.
-**Solution**: Assign to `appState.property` directly, or call the corresponding `appState.loadXxx()` / `appState.invalidateCache()` methods. Never assign to computed property bridges.
-**Pattern**: `DiskSight/Views/Cache/CacheView.swift`, `DiskSight/Views/StaleFiles/StaleFilesView.swift`
+Assign to `appState.property` directly, not computed bridges from AppState.
 
 ### 10. .foregroundColor Doesn't Accept ShapeStyle
-**Symptom**: Build error "member 'tertiary' in 'Color?' produces result of type 'some ShapeStyle'"
-**Cause**: `.foregroundColor()` expects `Color?`, but `.tertiary` is a `ShapeStyle`, not a `Color`
-**Solution**: Use `.foregroundStyle(.tertiary)` instead of `.foregroundColor(.tertiary)`
-**Pattern**: `DiskSight/Views/Visualization/TreemapView.swift`
+`.foregroundColor(.tertiary)` fails — use `.foregroundStyle(.tertiary)` for ShapeStyle values.
 
-### 4. ForEach + .position() Breaks Hit Testing
-**Symptom**: Hover/click detection doesn't work on visualization overlays
-**Cause**: SwiftUI's `ForEach` + `.position()` overlay doesn't reliably intercept gestures
-**Solution**: Use `onContinuousHover` + manual rect/arc containment checks. Use `SpatialTapGesture` for clicks.
-**Pattern**: `DiskSight/Views/Visualization/TreemapView.swift`, `SunburstView.swift`, `IcicleView.swift`
+### 20. isLoading Spinner Flickers on Fast Navigation
+Keep old content during drill-down. Only `isLoading` for initial load.
+
+### 21. .onChange(of: nodes.count) Misses Same-Count Navigations
+Fix: composite identity `"\(count)|\(firstPath)"` for `.onChange`.
+
+### 25. HSplitView Dynamically Adding Children Fails
+SwiftUI never adds second pane if initially `nil`. Fix: always render both slots with placeholder when data unavailable.
 
 ---
 
 ## Scanner
 
 ### 5. .skipsHiddenFiles Hides ~450GB of Data
-**Symptom**: Scan reports much less data than expected (misses dotfiles, /private, caches)
-**Cause**: `FileManager.enumerator` with `.skipsHiddenFiles` skips hidden files by default
-**Solution**: Remove `.skipsHiddenFiles` option from the enumerator
-**Pattern**: `DiskSight/Services/Scanner/FileScanner.swift`
+Remove `.skipsHiddenFiles` from `FileManager.enumerator` to capture dotfiles, /private, caches.
 
 ---
 
 ## Architecture
 
 ### 8. FSEvents Invalidates All Cached View Data
-**Symptom**: View data may become stale when filesystem changes occur
-**Cause**: FSEvents monitor fires when files are created/modified/deleted
-**Solution**: `invalidateCache()` is called from the FSEvents sink, clearing all `@Published` cached data on AppState. Views re-load on next `.task` call.
-**Pattern**: `DiskSight/App/AppState.swift:startMonitoring`
+`invalidateCache()` called from FSEvents sink, clears all `@Published` cached data. Views re-load on next `.task`.
 
 ### 11. .task Doesn't Re-Fire After Scan Completes
-**Symptom**: Visualization tab shows "No Data to Visualize" after a scan completes
-**Cause**: SwiftUI `.task` fires once on view appearance. If the view is already visible during scanning, `.task` runs with incomplete data (directories have `size = 0` before `calculateDirectorySizes`). When scan completes, `.task` won't re-fire.
-**Solution**: Add `.onChange(of: appState.scanState)` to reload viz data when scan transitions to `.completed`. Also guard `.task` to only load when `scanState == .completed`.
-**Pattern**: `DiskSight/Views/Visualization/VisualizationContainer.swift`
+Add `.onChange(of: appState.scanState)` to reload on `.completed` transition. Guard `.task` to skip during active scans.
+
+### 14. FSEvents Event ID Lost on App Quit
+`nonisolated saveEventIdSync()` via `MainActor.assumeIsolated`. Called from termination notification, `scenePhase(.background)`, `stopMonitoring()`.
+
+### 15. MustScanSubDirs Flag Requires Full Rescan
+`kFSEventStreamEventFlagMustScanSubDirs` → individual paths unreliable. Publish on `rescanSubject` → `triggerQuickRescan()`.
+
+### 16. FSEvents Incremental Updates Leave Dir Sizes Stale
+Fix: `updateAncestorSizes(forPaths:)` — collect ancestors, sort deepest-first, re-sum children.
+
+### 17. handleBecameActive + invalidateCache Wipes View Data on Launch
+Never `invalidateCache()` from `handleBecameActive()` — `.active` fires on initial launch after `.task`.
+
+### 19. invalidateCache() Must Not Clear Viz Navigation State
+`vizCurrentPath`/`vizBreadcrumbs` are UI state — only clear `vizChildNodes`.
 
 ---
 
-## Lifecycle Management
+## Database (continued)
 
-- **SUPERSEDED**: When a gotcha is resolved, mark it: `## #N: [Title] ~~SUPERSEDED~~`
-- **Merging**: If two gotchas share a root cause, merge and note consolidated numbers
-- **Pruning**: When gotchas exceed 30 items or 15k chars, prune SUPERSEDED entries older than 90 days
-- **Numbering**: Original numbers are permanent — gaps are intentional. Never renumber.
+### 18. URL("/") Parent Path Produces "/.." Corruption
+`URL("/").deletingLastPathComponent().path` → `"//.."`. Special-case `"/"` to use `nil` parent. `rootNode()` has `parent_path = '/..'` fallback.
+
+### 22. Per-Event Cache Invalidation Causes Beachball on Bulk Ops
+Fix: `batchProcessedSubject` fires once after DB batch → single invalidation. `deleteFiles(paths:)` batches in 500-chunks.
+
+### 23. Full-File-Set Queries Must Be Paginated
+100k+ files → paginate with 5000/page via `nonDirectoryFiles(forSession:limit:offset:)`. Process each page before loading next. Add composite DB index on query columns.
+
+---
+
+## Architecture (continued)
+
+### 24. AsyncStream Initial Progress Must Be Set Before Async Work
+Set progress state on `@MainActor` BEFORE `await`-ing the stream — UI sees stale state until first `yield`.
+
+### 26. Actor Contention Blocks Viz Reads Behind FSEvents Writes
+Fix: `nonisolated` concurrent read methods bypass actor via `DatabasePool.read` (thread-safe).
+
+---
+
+## Lifecycle
+
+- **SUPERSEDED**: `## #N: [Title] ~~SUPERSEDED~~`
+- **Pruning**: >30 items or >15k chars → prune old SUPERSEDED
+- **Numbering**: Permanent, gaps intentional

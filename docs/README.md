@@ -28,6 +28,7 @@ DiskSight is a native macOS application for disk usage visualization and analysi
 - **Duplicate detection** via a 3-stage hash pipeline (size grouping, partial hash, full hash)
 - **Stale file detection** with configurable time thresholds
 - **Cache detection** with safety-coded cleanup recommendations
+- **Smart Cleanup** with hybrid rule engine + optional Ollama LLM
 - **Real-time monitoring** via FSEvents for live filesystem change tracking
 
 ## Architecture Summary
@@ -35,11 +36,14 @@ DiskSight is a native macOS application for disk usage visualization and analysi
 ```
 DiskSightApp → AppState (central @MainActor ObservableObject)
   ├─ FileRepository (actor) ← Database (SQLite/GRDB singleton)
+  │   └─ nonisolated concurrent reads (bypass actor for viz performance)
   ├─ FileScanner → batch directory walking
   ├─ FSEventsMonitor → real-time file change tracking
   ├─ DuplicateFinder → 3-stage hash pipeline
   ├─ StaleFinder → date-based detection
-  └─ CacheDetector → pattern-based detection
+  ├─ CacheDetector → pattern-based detection
+  ├─ SmartCleanupService → FileClassifier + optional OllamaClient
+  └─ CSVExporter (static)
 ```
 
 Views read cached data from `AppState` and call `loadXxx()` methods which no-op if data is already loaded.

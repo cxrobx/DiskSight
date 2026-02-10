@@ -13,7 +13,7 @@ struct SidebarView: View {
             }
 
             Section("Clean Up") {
-                ForEach([SidebarSection.duplicates, .staleFiles, .cache]) { section in
+                ForEach([SidebarSection.duplicates, .staleFiles, .cache, .smartCleanup]) { section in
                     Label(section.rawValue, systemImage: section.icon)
                         .tag(section)
                 }

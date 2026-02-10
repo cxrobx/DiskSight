@@ -84,6 +84,9 @@ struct FolderTreeRow: View {
             .onTapGesture {
                 onSelect(node)
             }
+            .contextMenu {
+                VisualizationContextMenu(node: node.fileNode)
+            }
         }
         .id(node.fileNode.path)
         .onChange(of: node.isExpanded) { expanded in

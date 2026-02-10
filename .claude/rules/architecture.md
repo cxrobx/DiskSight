@@ -1,82 +1,67 @@
 # Architecture Patterns
 
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Language | Swift |
-| UI Framework | SwiftUI |
-| Platform | macOS 14.0+ (Sonoma) |
-| Architecture | MVVM |
-| Database | SQLite via GRDB.swift 7.8.0 |
-| Hashing | xxHash-Swift 1.1.1 |
-| Build System | Xcode + SPM |
-| Bundle ID | com.disksight.app |
-
-## Service Graph
-
-```
-DiskSightApp
- └─ AppState (@MainActor ObservableObject)
-     ├─ FileRepository (actor) ← Database (singleton, DatabasePool)
-     ├─ FileScanner → FileRepository
-     ├─ FSEventsMonitor → FileRepository
-     ├─ DuplicateFinder → FileRepository + FileHasher
-     ├─ StaleFinder → FileRepository
-     ├─ CacheDetector → FileRepository
-     └─ CSVExporter (static, called from exportCSV())
-```
+Tech stack: Swift, SwiftUI (MVVM), macOS 14.0+, SQLite/GRDB 7.8.0, xxHash-Swift 1.1.1, Xcode+SPM, `com.disksight.app`
 
 ## Critical Invariants (DO NOT BREAK)
 
-1. **AppState is @MainActor**: All `@Published` properties live on `AppState`. Views access via `@EnvironmentObject`. Never publish from background threads.
-   - Pattern: `DiskSight/App/AppState.swift`
-
-2. **FileRepository is an actor**: All database access goes through `FileRepository`. Never call GRDB directly from views or other services.
-   - Pattern: `DiskSight/Services/Storage/FileRepository.swift`
-
-3. **Database is a singleton**: `Database.shared` owns the `DatabasePool`. Migrations run on init. Never create a second pool.
-   - Pattern: `DiskSight/Services/Storage/Database.swift`
-
-4. **View data is cached on AppState**: Overview stats, visualization nodes/breadcrumbs, duplicates, stale files, and caches are `@Published` on AppState. Views read computed properties, `.task` calls `loadXxx()` which no-ops if data exists. `invalidateCache()` nils everything.
-   - Pattern: `DiskSight/App/AppState.swift`
-
-5. **Trash-based deletion only**: All file deletion uses `FileManager.trashItem`. Never use `removeItem` — users expect recoverability.
-   - Pattern: `DiskSight/Views/Duplicates/DuplicatesView.swift`
+1. **AppState is @MainActor** — all `@Published` properties, views access via `@EnvironmentObject`. Never publish from background threads.
+2. **FileRepository is an actor** — all DB access goes through it. Never call GRDB directly.
+3. **Database is a singleton** — `Database.shared` owns the pool, migrations on init.
+4. **View data cached on AppState** — `loadXxx()` no-ops if data exists, `invalidateCache()` nils everything.
+5. **Trash-based deletion only** — `FileManager.trashItem`, never `removeItem`.
 
 ## Key Patterns
 
 ### Data Caching
-- `@Published var overviewFileCount: Int?` etc. on AppState
-- `loadOverviewData()` / `loadVisualizationRoot()` / `loadStaleFiles()` / `loadCacheData()` — skip if data already loaded
-- `invalidateCache()` — called on scan start, FSEvents changes, file trashing
-- Visualization drill-down state persists across tab switches
+- `loadXxx()` no-ops if data exists; `invalidateCache()` nils cached data. **Never** from `handleBecameActive()` (gotcha #17)
+- Viz navigation (`vizCurrentPath`, `vizBreadcrumbs`) preserved across invalidation — only `vizChildNodes` cleared (gotcha #19)
+- Drill-down state persists across tab switches and FSEvents cycles
 
 ### Visualization Views
 - Three modes: Treemap, Sunburst, Icicle — all share `VisualizationContainer`
 - Mode persisted via `@AppStorage("visualizationMode")`
-- Hit testing uses `SpatialTapGesture` + manual coordinate checks (not SwiftUI hit testing)
-- Hover uses `onContinuousHover` + manual rect/arc containment
-- Shared `VisualizationTooltip` and `VisualizationContextMenu` components
+- Hit testing: `SpatialTapGesture` + manual coordinate checks; hover: `onContinuousHover` + manual containment
+- **No loading spinners during navigation** — keep old content visible (gotcha #20)
+- **Composite identity for change detection** — `"\(count)|\(firstPath)"` not `.count` (gotcha #21)
 
 ### FSEvents Monitoring
-- Native C API via `FSEventStreamCreate` with file-level granularity
-- 2-second debounce coalesces rapid filesystem changes
-- Event ID persisted on `ScanSession` for resume across launches
-- Incremental DB updates: create/modify → upsert, delete → remove
+- C API `FSEventStreamCreate` with file-level granularity, 2s debounce
+- Event ID persisted on `ScanSession` for resume; saved synchronously on quit via `nonisolated updateEventIdSync()`
+- Incremental: create/modify → upsert, delete → remove; ancestor sizes recalculated via `updateAncestorSizes(forPaths:)`
+- **Batch processing pipeline**: `processPendingEvents()` classifies paths into upserts vs deletes upfront, batches DB operations. `batchProcessedSubject` fires once after the entire batch completes (gotcha #22)
+- **Two AppState subscribers**: `eventCancellable` collects raw events in 2s windows for UI log only; `batchCancellable` subscribes to `batchProcessedSubject` for single `invalidateCache()` + refresh per batch
+- `MustScanSubDirs` → full rescan via `rescanSubject`; stale event ID (>7 days) → auto rescan
+- Root path `"/"` special-cased: `nil` parent (gotcha #18)
 
-### Duplicate Detection Pipeline
-- Stage 1: Group files by size
-- Stage 2: Partial hash (first+last 8KB via xxHash)
-- Stage 3: Full hash (streaming xxHash)
-- Results cached on `appState.duplicateGroups`
+### App Lifecycle (scenePhase)
+- `.background` → save event ID. `.active` → restart dead monitors only. **Never `invalidateCache()`** (gotcha #17)
+- `willTerminateNotification` → belt-and-suspenders event ID save
+- Cache invalidation handled exclusively by `batchProcessedSubject` subscriber (gotcha #22)
+
+### Duplicate Detection
+- 3-stage pipeline: size grouping → partial xxHash (first+last 8KB) → full xxHash. Cached on `appState.duplicateGroups`
 
 ### CSV Export
-- `CSVExporter.generate(from:)` — static method converting `[FileNode]` → CSV string
-- `AppState.exportCSV()` — fetches all files via `FileRepository.allFiles(forSession:)`, generates CSV, presents `NSSavePanel`
-- UI entry points: Overview quick actions button + File menu `Cmd+Shift+E`
-- Pattern: `DiskSight/Services/Export/CSVExporter.swift`
+- `CSVExporter.generate(from:)` static, `AppState.exportCSV()` with `NSSavePanel`. UI: Overview + File menu `Cmd+Shift+E`
 
-### Batch Inserts
-- `FileScanner` batches 1000 file nodes per transaction for performance
-- Per-file `try?` on `resourceValues` so one unreadable file doesn't abort scan
+### Dark Mode
+- `AppearanceMode` persisted via `@AppStorage("appearanceMode")`. Canvas: `@Environment(\.colorScheme)`. Tooltips: `.ultraThinMaterial` + semantic colors
+
+### Folder Tree Sidebar
+- `FolderTreeNode` (`@MainActor ObservableObject`) with lazy children via `directoryChildrenConcurrent()`
+- Bidirectional sync in `VisualizationContainer` via `HSplitView`: tree selection drives chart, chart drives `expandTo()`
+- `rootNode()` resilient query: `parent_path IS NULL` with `parent_path = '/..'` fallback (gotcha #18)
+- HSplitView must always render both children (gotcha #25). Context menu reuses `VisualizationContextMenu`
+- **dataVersion-driven refresh**: `AppState.dataVersion` incremented on batch completion; `.onChange(of: dataVersion)` rebuilds tree via `initTreeRoot()` + `syncTreeToCurrentPath()` (preserves nav position)
+
+### Smart Cleanup
+- **Hybrid**: Tier 1 `FileClassifier` (~50 rules) + Tier 2 optional `OllamaClient` LLM (graceful degradation)
+- **Paginated**: 5000 files/page as `AsyncStream`, classify first then merge cross-analysis signals (gotcha #23)
+- **OllamaClient**: Actor to `localhost:11434`; filters embedding models; sorts by param size
+- **DB**: `cleanup_recommendations` (v2) + composite index `(scan_session_id, is_directory)` (v3)
+- **Progress**: Set initial state BEFORE async work (gotcha #24)
+
+### Batch DB Operations
+- **Inserts**: `FileScanner` batches 1000 nodes/transaction; per-file `try?` on `resourceValues`
+- **Deletes**: `FileRepository.deleteFiles(paths:)` chunks 500 paths per `DELETE WHERE path IN (...)`
+- **Concurrent reads**: `nonisolated` methods (`rootNodeConcurrent`, `childrenWithSizesConcurrent`, `directoryChildrenConcurrent`) bypass actor for read-only queries (gotcha #26)

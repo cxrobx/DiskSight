@@ -52,7 +52,7 @@ docs/                             # Read on demand
 └── setup.md                      # Environment & build setup
 ```
 
-**Context budget**: Always-loaded rules should stay under 10k chars combined.
+**Context budget**: Always-loaded rules should stay under 10k chars combined. Total context with all rules < 25k chars.
 
 ---
 
@@ -66,7 +66,7 @@ docs/                             # Read on demand
 
 ### Tier 2: Rule Files (Primary)
 
-**Always-loaded:**
+**Always-loaded (NO frontmatter):**
 | File | Update When |
 |------|-------------|
 | `.claude/rules/architecture.md` | Core architectural changes |
@@ -103,6 +103,7 @@ docs/                             # Read on demand
 
 ### Hard Gates (block until fixed)
 - [ ] Always-loaded rules (architecture.md + gotchas.md) < 10k chars combined
+- [ ] Total context with all rules < 25k chars
 - [ ] CHANGELOG.md has dated entry
 - [ ] Recent Learnings updated in CLAUDE.md
 
@@ -113,6 +114,40 @@ docs/                             # Read on demand
 - [ ] No large code blocks in rules (use file refs instead)
 - [ ] No duplicate content across files
 - [ ] Recent Learnings has `YYYY-MM-DD:` format
+
+---
+
+## Subdirectory CLAUDE.md Pattern
+
+Create subdirectory CLAUDE.md files when a directory has:
+- **20+ files** with distinct patterns worth documenting
+- **Its own tech stack** (e.g., different framework or paradigm)
+- **Domain-specific conventions** not covered by parent rules
+
+**What goes in subdirectory CLAUDE.md:**
+- Domain-specific patterns and conventions for that directory
+- Cross-references to gotchas by number (e.g., "See Gotcha #7")
+- File organization and naming conventions
+- Quick reference for key files in that directory
+
+**Format template:**
+```markdown
+# [Directory Name] Patterns
+
+## Overview
+[1-2 sentences: what this directory contains]
+
+## Key Files
+| File | Purpose |
+|------|---------|
+| `example.swift` | [description] |
+
+## Conventions
+[Directory-specific patterns]
+
+## Related Gotchas
+- #N: [relevant gotcha title]
+```
 
 ---
 

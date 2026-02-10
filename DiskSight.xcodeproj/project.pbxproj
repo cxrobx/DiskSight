@@ -42,6 +42,12 @@
 		AA22BB33CC44DD55EE660002 /* CSVExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA22BB33CC44DD55EE660001 /* CSVExporter.swift */; };
 		AB11CC22DD33EE44FF550002 /* FolderTreeNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB11CC22DD33EE44FF550001 /* FolderTreeNode.swift */; };
 		AB11CC22DD33EE44FF550004 /* FolderTreeSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB11CC22DD33EE44FF550003 /* FolderTreeSidebar.swift */; };
+		A100000000000000000000B2 /* FileCategory.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B1 /* FileCategory.swift */; };
+		A100000000000000000000B4 /* CleanupRecommendation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B3 /* CleanupRecommendation.swift */; };
+		A100000000000000000000B6 /* FileClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B5 /* FileClassifier.swift */; };
+		A100000000000000000000B8 /* OllamaClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B7 /* OllamaClient.swift */; };
+		A100000000000000000000BA /* SmartCleanupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B9 /* SmartCleanupService.swift */; };
+		A100000000000000000000BC /* SmartCleanupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000BB /* SmartCleanupView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -80,6 +86,12 @@
 		FF66AA77BB88CC99DD000005 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		FF66AA77BB88CC99DD000007 /* FileRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileRowView.swift; sourceTree = "<group>"; };
 		AA22BB33CC44DD55EE660001 /* CSVExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CSVExporter.swift; sourceTree = "<group>"; };
+		A100000000000000000000B1 /* FileCategory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileCategory.swift; sourceTree = "<group>"; };
+		A100000000000000000000B3 /* CleanupRecommendation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupRecommendation.swift; sourceTree = "<group>"; };
+		A100000000000000000000B5 /* FileClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileClassifier.swift; sourceTree = "<group>"; };
+		A100000000000000000000B7 /* OllamaClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaClient.swift; sourceTree = "<group>"; };
+		A100000000000000000000B9 /* SmartCleanupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCleanupService.swift; sourceTree = "<group>"; };
+		A100000000000000000000BB /* SmartCleanupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCleanupView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -140,6 +152,8 @@
 				D8D7824EE61D5A6B5513850A /* FileNode.swift */,
 				CF54BC3C911EC85ADE7B78E3 /* ScanSession.swift */,
 				FABB6D193766F9ECD9FC936C /* DuplicateGroup.swift */,
+				A100000000000000000000B1 /* FileCategory.swift */,
+				A100000000000000000000B3 /* CleanupRecommendation.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -153,6 +167,7 @@
 				CC33DD44EE55FF66AA770006 /* Analysis */,
 				EE55FF66AA77BB88CC990003 /* Monitor */,
 				AA22BB33CC44DD55EE660003 /* Export */,
+				A100000000000000000000BD /* AI */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -184,6 +199,7 @@
 				CC33DD44EE55FF66AA770009 /* Duplicates */,
 				DD44EE55FF66AA77BB880007 /* StaleFiles */,
 				DD44EE55FF66AA77BB88000A /* Cache */,
+				A100000000000000000000BF /* SmartCleanup */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -304,6 +320,24 @@
 			path = Export;
 			sourceTree = "<group>";
 		};
+		A100000000000000000000BD /* AI */ = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000000B5 /* FileClassifier.swift */,
+				A100000000000000000000B7 /* OllamaClient.swift */,
+				A100000000000000000000B9 /* SmartCleanupService.swift */,
+			);
+			path = AI;
+			sourceTree = "<group>";
+		};
+		A100000000000000000000BF /* SmartCleanup */ = {
+			isa = PBXGroup;
+			children = (
+				A100000000000000000000BB /* SmartCleanupView.swift */,
+			);
+			path = SmartCleanup;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -403,6 +437,12 @@
 				FF66AA77BB88CC99DD000006 /* OnboardingView.swift in Sources */,
 				FF66AA77BB88CC99DD000008 /* FileRowView.swift in Sources */,
 				AA22BB33CC44DD55EE660002 /* CSVExporter.swift in Sources */,
+				A100000000000000000000B2 /* FileCategory.swift in Sources */,
+				A100000000000000000000B4 /* CleanupRecommendation.swift in Sources */,
+				A100000000000000000000B6 /* FileClassifier.swift in Sources */,
+				A100000000000000000000B8 /* OllamaClient.swift in Sources */,
+				A100000000000000000000BA /* SmartCleanupService.swift in Sources */,
+				A100000000000000000000BC /* SmartCleanupView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

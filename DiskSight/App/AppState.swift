@@ -57,6 +57,10 @@ final class AppState: ObservableObject {
     @Published var isMonitoring: Bool = false
     @Published var recentEvents: [FSEventInfo] = []
 
+    /// Incremented each time FSEvents batch processing completes.
+    /// Views can observe this to refresh stale data (e.g., folder tree sizes).
+    @Published var dataVersion: Int = 0
+
     // MARK: - Cached Data (survives tab switches)
 
     // Overview
@@ -93,6 +97,7 @@ final class AppState: ObservableObject {
     let fileRepository: FileRepository
     private var fsMonitor: FSEventsMonitor?
     private var eventCancellable: AnyCancellable?
+    private var batchCancellable: AnyCancellable?
     private var rescanCancellable: AnyCancellable?
     private var terminationObserver: Any?
 
@@ -169,24 +174,37 @@ final class AppState: ObservableObject {
         let monitor = FSEventsMonitor(repository: fileRepository)
         self.fsMonitor = monitor
 
-        // Subscribe to events for UI updates + cache invalidation + event ID persistence
+        // Collect events in 2-second windows for the UI event log.
+        // This prevents thousands of individual @Published updates from flooding
+        // the main thread during bulk operations like rm -rf.
         eventCancellable = monitor.eventSubject
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] event in
-                guard let self else { return }
-                self.recentEvents.insert(event, at: 0)
-                if self.recentEvents.count > 50 {
-                    self.recentEvents = Array(self.recentEvents.prefix(50))
-                }
-                self.invalidateCache()
+            .collect(.byTime(DispatchQueue.main, .seconds(2)))
+            .sink { [weak self] events in
+                guard let self, !events.isEmpty else { return }
+                // Take only the most recent events to cap the list
+                let newEvents = Array(events.suffix(50))
+                self.recentEvents = (newEvents + self.recentEvents).prefix(50).map { $0 }
+            }
 
-                // Persist event ID on each debounced batch so crash recovery
-                // loses at most the last 2-second window
-                if let session = self.lastScanSession, let sessionId = session.id {
+        // Cache invalidation + viz refresh fires ONCE per processed batch,
+        // not per individual event. This is what fixes the beachball — previously
+        // each of N events triggered invalidateCache() + refreshVisualizationData().
+        batchCancellable = monitor.batchProcessedSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.invalidateCache()
+                self.dataVersion += 1
+                Task { await self.refreshVisualizationData() }
+
+                // Persist latest event ID for crash recovery
+                if let monitor = self.fsMonitor,
+                   let session = self.lastScanSession, let sessionId = session.id {
+                    let eventId = monitor.currentEventId
                     Task {
                         try? await self.fileRepository.updateEventId(
                             sessionId: sessionId,
-                            eventId: Int64(event.eventId)
+                            eventId: Int64(eventId)
                         )
                     }
                 }
@@ -229,6 +247,7 @@ final class AppState: ObservableObject {
         fsMonitor?.stop()
         fsMonitor = nil
         eventCancellable = nil
+        batchCancellable = nil
         rescanCancellable = nil
         isMonitoring = false
     }
@@ -289,8 +308,8 @@ final class AppState: ObservableObject {
         do {
             overviewFileCount = try await fileRepository.fileCount()
             overviewTotalSize = try await fileRepository.totalSize()
-            if let root = try await fileRepository.rootNode() {
-                overviewTopFolders = try await fileRepository.childrenWithSizes(ofPath: root.path)
+            if let root = try fileRepository.rootNodeConcurrent() {
+                overviewTopFolders = try fileRepository.childrenWithSizesConcurrent(ofPath: root.path)
                     .filter { $0.isDirectory }
                     .prefix(10)
                     .map { $0 }
@@ -306,11 +325,11 @@ final class AppState: ObservableObject {
         do {
             if let currentPath = vizCurrentPath {
                 // Reload data for current drill-down position (preserves navigation after cache invalidation)
-                vizChildNodes = try await fileRepository.childrenWithSizes(ofPath: currentPath)
-            } else if let root = try await fileRepository.rootNode() {
+                vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: currentPath)
+            } else if let root = try fileRepository.rootNodeConcurrent() {
                 // First load — navigate to root
                 vizCurrentPath = root.path
-                vizChildNodes = try await fileRepository.childrenWithSizes(ofPath: root.path)
+                vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: root.path)
                 vizBreadcrumbs = []
             }
         } catch {}
@@ -330,7 +349,7 @@ final class AppState: ObservableObject {
 
         vizCurrentPath = node.path
         do {
-            vizChildNodes = try await fileRepository.childrenWithSizes(ofPath: node.path)
+            vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: node.path)
         } catch {
             vizChildNodes = []
         }
@@ -343,7 +362,7 @@ final class AppState: ObservableObject {
 
         vizCurrentPath = crumb.path
         do {
-            vizChildNodes = try await fileRepository.childrenWithSizes(ofPath: crumb.path)
+            vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: crumb.path)
         } catch {
             vizChildNodes = []
         }
@@ -352,7 +371,7 @@ final class AppState: ObservableObject {
     /// Navigate to an arbitrary path, rebuilding breadcrumbs from the scan root down.
     /// Used by the folder tree sidebar to jump multiple levels at once.
     func vizNavigateToPath(_ targetPath: String) async {
-        guard let rootPath = try? await fileRepository.rootNode()?.path else { return }
+        guard let rootPath = try? fileRepository.rootNodeConcurrent()?.path else { return }
 
         // If navigating to root, just reset
         if targetPath == rootPath {
@@ -396,7 +415,7 @@ final class AppState: ObservableObject {
         vizBreadcrumbs = crumbs
         vizCurrentPath = targetPath
         do {
-            vizChildNodes = try await fileRepository.childrenWithSizes(ofPath: targetPath)
+            vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: targetPath)
         } catch {
             vizChildNodes = []
         }
@@ -405,7 +424,9 @@ final class AppState: ObservableObject {
     func vizNavigateToRoot() async {
         vizBreadcrumbs = []
         vizCurrentPath = nil
-        await loadVisualizationRoot()
+        // Use refreshVisualizationData which fetches root children
+        // (loadVisualizationRoot would no-op since vizChildNodes isn't empty)
+        await refreshVisualizationData()
     }
 
     func loadStaleFiles(threshold: StaleThreshold) async {
@@ -439,6 +460,7 @@ final class AppState: ObservableObject {
         isAnalyzingCleanup = true
         cleanupRecommendations = nil
         cleanupSummary = nil
+        cleanupProgress = ClassificationProgress(processed: 0, total: 0, currentFile: "Loading files...")
 
         do {
             // Clear previous recommendations
@@ -454,7 +476,16 @@ final class AppState: ObservableObject {
             let stream = await service.analyze(sessionId: sessionId, useLLM: useLLM)
             for await (progress, recs) in stream {
                 cleanupProgress = progress
-                allRecs.append(contentsOf: recs)
+                // The service yields batches, then optionally a full enhanced set at the end.
+                // If a yield contains all files (progress.processed == progress.total and
+                // recs.count matches total so far), treat it as a replacement.
+                if progress.processed == progress.total && recs.count == allRecs.count {
+                    allRecs = recs
+                } else {
+                    allRecs.append(contentsOf: recs)
+                }
+                // Show partial results immediately
+                cleanupRecommendations = allRecs
             }
 
             // Persist to DB
@@ -500,6 +531,7 @@ final class AppState: ObservableObject {
             cleanupSummary = try? await fileRepository.recommendationSummary(forSession: sessionId)
         }
         invalidateCache()
+        await refreshVisualizationData()
     }
 
     func trashAllSafeCleanup() async {
@@ -514,21 +546,34 @@ final class AppState: ObservableObject {
             cleanupSummary = try? await fileRepository.recommendationSummary(forSession: sessionId)
         }
         invalidateCache()
+        await refreshVisualizationData()
     }
 
     func invalidateCache() {
         overviewFileCount = nil
         overviewTotalSize = nil
         overviewTopFolders = nil
-        vizChildNodes = []
-        // Preserve vizCurrentPath and vizBreadcrumbs — these are navigation
-        // state, not cached data. Clearing them loses the user's drill-down
-        // position with no way to restore it (`.task` won't re-fire).
+        // vizChildNodes is NOT cleared here — clearing it causes a blank frame
+        // because the view shows the empty state before the reload completes.
+        // Instead, refreshVisualizationData() replaces the data atomically.
+        // vizCurrentPath and vizBreadcrumbs are navigation state, not cached data.
         duplicateGroups = nil
         staleFiles = nil
         detectedCaches = nil
         cleanupRecommendations = nil
         cleanupSummary = nil
+    }
+
+    /// Reload viz data in-place without clearing first (prevents blank frame flicker)
+    func refreshVisualizationData() async {
+        do {
+            if let currentPath = vizCurrentPath {
+                vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: currentPath)
+            } else if let root = try fileRepository.rootNodeConcurrent() {
+                vizCurrentPath = root.path
+                vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: root.path)
+            }
+        } catch {}
     }
 
     private func loadLastSession() {

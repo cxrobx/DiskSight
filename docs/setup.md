@@ -43,6 +43,7 @@ DiskSight uses a local SQLite database via GRDB. The database is created automat
 - `files` — File metadata (path, size, dates, type, hashes)
 - `scan_sessions` — Scan tracking with FSEvents resume IDs
 - `cache_patterns` — Cache detection patterns (10 pre-seeded)
+- `cleanup_recommendations` — Smart Cleanup results (v2 migration, indexed by session+directory in v3)
 
 **Location:** Application support directory (managed by GRDB `DatabasePool`)
 

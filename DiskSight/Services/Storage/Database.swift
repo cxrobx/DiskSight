@@ -68,6 +68,34 @@ final class Database: Sendable {
             }
         }
 
+        migrator.registerMigration("v2_smart_cleanup") { db in
+            try db.create(table: "cleanup_recommendations") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("file_path", .text).notNull()
+                t.column("file_name", .text).notNull()
+                t.column("file_size", .integer).notNull().defaults(to: 0)
+                t.column("category", .text).notNull()
+                t.column("confidence", .text).notNull()
+                t.column("explanation", .text).notNull()
+                t.column("signals", .text).notNull().defaults(to: "[]")
+                t.column("llm_enhanced", .boolean).notNull().defaults(to: false)
+                t.column("scan_session_id", .integer).references("scan_sessions")
+                t.column("created_at", .double).notNull()
+            }
+
+            try db.create(index: "idx_cleanup_session", on: "cleanup_recommendations", columns: ["scan_session_id"])
+            try db.create(index: "idx_cleanup_confidence", on: "cleanup_recommendations", columns: ["confidence"])
+            try db.create(index: "idx_cleanup_category", on: "cleanup_recommendations", columns: ["category"])
+        }
+
+        migrator.registerMigration("v3_files_session_directory_index") { db in
+            try db.create(
+                index: "idx_files_session_directory",
+                on: "files",
+                columns: ["scan_session_id", "is_directory"]
+            )
+        }
+
         return migrator
     }
 }

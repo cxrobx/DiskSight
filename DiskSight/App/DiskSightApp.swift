@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct DiskSightApp: App {
     @StateObject private var appState = AppState()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showOnboarding = false
     @State private var showSearch = false
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
@@ -35,6 +36,16 @@ struct DiskSightApp: App {
                         showOnboarding = true
                     }
                 }
+                .onChange(of: scenePhase) { _, newPhase in
+                    switch newPhase {
+                    case .background:
+                        appState.saveEventIdSync()
+                    case .active:
+                        appState.handleBecameActive()
+                    default:
+                        break
+                    }
+                }
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1200, height: 800)
@@ -64,6 +75,11 @@ struct DiskSightApp: App {
                     appState.selectedSection = .cache
                 }
                 .keyboardShortcut("5", modifiers: .command)
+
+                Button("Smart Cleanup") {
+                    appState.selectedSection = .smartCleanup
+                }
+                .keyboardShortcut("6", modifiers: .command)
             }
 
             CommandGroup(after: .saveItem) {
@@ -106,6 +122,8 @@ struct ContentView: View {
                 StaleFilesView()
             case .cache:
                 CacheView()
+            case .smartCleanup:
+                SmartCleanupView()
             }
         }
     }

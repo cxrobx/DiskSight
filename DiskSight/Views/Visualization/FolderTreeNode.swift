@@ -17,7 +17,7 @@ class FolderTreeNode: ObservableObject, Identifiable {
     func loadChildren(using repository: FileRepository) async {
         guard children == nil else { return }
         do {
-            let dirChildren = try await repository.directoryChildren(ofPath: fileNode.path)
+            let dirChildren = try repository.directoryChildrenConcurrent(ofPath: fileNode.path)
             children = dirChildren.map { FolderTreeNode(fileNode: $0, depth: depth + 1) }
         } catch {
             children = []

@@ -33,16 +33,31 @@ struct VisualizationContainer: View {
 
     var body: some View {
         HSplitView {
-            // Folder tree sidebar
-            if let rootNode = rootTreeNode {
-                FolderTreeSidebar(
-                    rootNode: rootNode,
-                    selectedPath: appState.vizCurrentPath,
-                    onSelect: { node in
-                        navigateToPath(node.fileNode.path)
-                    },
-                    repository: appState.fileRepository
-                )
+            // Sidebar — always present for stable HSplitView layout.
+            // Dynamically adding/removing HSplitView children after initial
+            // render causes the sidebar to never appear.
+            Group {
+                if let rootNode = rootTreeNode {
+                    FolderTreeSidebar(
+                        rootNode: rootNode,
+                        selectedPath: appState.vizCurrentPath,
+                        onSelect: { node in
+                            navigateToPath(node.fileNode.path)
+                        },
+                        repository: appState.fileRepository
+                    )
+                } else if case .completed = appState.scanState {
+                    VStack {
+                        Spacer()
+                        ProgressView()
+                        Text("Loading folders…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                        Spacer()
+                    }
+                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 350)
+                }
             }
 
             // Main chart area
@@ -67,27 +82,38 @@ struct VisualizationContainer: View {
             }
         }
         .task {
-            if childNodes.isEmpty, case .completed = appState.scanState {
+            guard case .completed = appState.scanState else { return }
+            if childNodes.isEmpty {
                 isLoading = true
                 await appState.loadVisualizationRoot()
-                await initTreeRoot()
                 isLoading = false
+            }
+            if rootTreeNode == nil {
+                await initTreeRoot()
             }
         }
         .onChange(of: appState.scanState) { _, newState in
             if case .completed = newState {
                 Task {
-                    await appState.loadVisualizationRoot()
+                    // Use refresh (not load) — vizChildNodes may have stale data from previous scan
+                    appState.vizCurrentPath = nil
+                    appState.vizBreadcrumbs = []
+                    await appState.refreshVisualizationData()
                     await initTreeRoot()
                 }
             }
         }
-        .onChange(of: childNodes.isEmpty) { _, isEmpty in
-            // Reload after FSEvents cache invalidation clears vizChildNodes
-            if isEmpty, case .completed = appState.scanState {
-                Task {
-                    await appState.loadVisualizationRoot()
-                }
+        .onChange(of: childNodes.count) { _, count in
+            // Safety net: if chart data loaded but tree is missing, init it
+            if count > 0, rootTreeNode == nil {
+                Task { await initTreeRoot() }
+            }
+        }
+        .onChange(of: appState.dataVersion) { _, _ in
+            // FSEvents batch processed — rebuild tree with fresh sizes from DB
+            Task {
+                await initTreeRoot()
+                await syncTreeToCurrentPath()
             }
         }
     }
@@ -213,7 +239,7 @@ struct VisualizationContainer: View {
 
     private func initTreeRoot() async {
         do {
-            if let root = try await appState.fileRepository.rootNode() {
+            if let root = try appState.fileRepository.rootNodeConcurrent() {
                 let node = FolderTreeNode(fileNode: root, depth: 0)
                 await node.loadChildren(using: appState.fileRepository)
                 node.isExpanded = true
