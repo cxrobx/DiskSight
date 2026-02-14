@@ -56,6 +56,9 @@ final class AppState: ObservableObject {
     @Published var hasFullDiskAccess: Bool = false
     @Published var isMonitoring: Bool = false
     @Published var recentEvents: [FSEventInfo] = []
+    @Published var isExportingCSV: Bool = false
+    @Published var csvExportDone: Bool = false
+    @Published var isSyncing: Bool = false
 
     /// Incremented each time FSEvents batch processing completes.
     /// Views can observe this to refresh stale data (e.g., folder tree sizes).
@@ -93,6 +96,7 @@ final class AppState: ObservableObject {
     @Published var selectedOllamaModel: String = ""
 
     private var scanTask: Task<Void, Never>?
+    private var incrementalSyncTask: Task<Void, Never>?
     private let database: Database
     let fileRepository: FileRepository
     private var fsMonitor: FSEventsMonitor?
@@ -130,7 +134,14 @@ final class AppState: ObservableObject {
 
     func startScan(at url: URL) {
         scanTask?.cancel()
+        incrementalSyncTask?.cancel()
         stopMonitoring()
+
+        // Reset viz state — full scan means starting fresh
+        vizChildNodes = []
+        vizCurrentPath = nil
+        vizBreadcrumbs = []
+
         invalidateCache()
         scanState = .scanning(progress: ScanProgress())
 
@@ -148,6 +159,9 @@ final class AppState: ObservableObject {
                 }
 
                 try await fileRepository.completeScanSession(id: sessionId)
+                // Clean up files and sessions from previous scans
+                try? await fileRepository.deleteFilesFromPreviousSessions(currentSessionId: sessionId)
+                try? await fileRepository.deleteOldSessions(keepingId: sessionId)
                 self.lastScanSession = try await fileRepository.latestScanSession()
                 self.scanState = .completed
 
@@ -231,7 +245,11 @@ final class AppState: ObservableObject {
         if let completedAt = lastScanSession?.completedAt {
             let sevenDaysAgo = Date().timeIntervalSince1970 - (7 * 24 * 60 * 60)
             if completedAt < sevenDaysAgo {
-                triggerQuickRescan()
+                // Start monitoring from "now" to capture new changes while sync runs
+                monitor.start(path: path, sinceEventId: UInt64(kFSEventStreamEventIdSinceNow))
+                isMonitoring = true
+                // Incremental sync catches the gap since the last session
+                runIncrementalSync(path: path)
                 return
             }
         }
@@ -265,11 +283,38 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Trigger a full rescan of the monitored path. Called when MustScanSubDirs
+    /// Trigger an incremental sync of the monitored path. Called when MustScanSubDirs
     /// is detected or when the saved event ID is likely stale.
     private func triggerQuickRescan() {
         guard let rootPath = scanRootPath else { return }
-        startScan(at: rootPath)
+        runIncrementalSync(path: rootPath.path)
+    }
+
+    /// Background incremental sync — walks the filesystem and upserts only new/modified
+    /// files, deletes removed ones. Does NOT change scanState, so the UI stays usable
+    /// with existing viz data during the sync.
+    private func runIncrementalSync(path: String) {
+        incrementalSyncTask?.cancel()
+        guard let session = lastScanSession, let sessionId = session.id else { return }
+        isSyncing = true
+
+        incrementalSyncTask = Task {
+            let scanner = FileScanner(repository: fileRepository)
+            let rootURL = URL(fileURLWithPath: path)
+            let stream = scanner.incrementalScan(rootURL: rootURL, sessionId: sessionId)
+            for await _ in stream {
+                // Progress consumed silently — no scanning UI state change
+            }
+
+            // Update session timestamp to prevent re-triggering stale check
+            try? await fileRepository.updateSessionCompletedAt(id: sessionId)
+            self.lastScanSession = try? await fileRepository.latestScanSession()
+
+            self.invalidateCache()
+            self.dataVersion += 1
+            await self.refreshVisualizationData()
+            self.isSyncing = false
+        }
     }
 
     /// Called when the app returns to the foreground. Restarts monitoring if
@@ -287,9 +332,6 @@ final class AppState: ObservableObject {
         guard let session = lastScanSession, let sessionId = session.id else { return }
 
         Task {
-            let files = try await fileRepository.allFiles(forSession: sessionId)
-            let csv = CSVExporter.generate(from: files)
-
             let panel = NSSavePanel()
             panel.title = "Export Scan as CSV"
             panel.nameFieldStringValue = "DiskSight-Export.csv"
@@ -297,7 +339,20 @@ final class AppState: ObservableObject {
 
             guard panel.runModal() == .OK, let url = panel.url else { return }
 
-            try csv.write(to: url, atomically: true, encoding: .utf8)
+            isExportingCSV = true
+            csvExportDone = false
+            do {
+                try await CSVExporter.stream(from: fileRepository, sessionId: sessionId, to: url)
+                csvExportDone = true
+                // Clear success indicator after 3 seconds
+                Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    self.csvExportDone = false
+                }
+            } catch {
+                // Silently fail — file write errors are rare after NSSavePanel
+            }
+            isExportingCSV = false
         }
     }
 
@@ -578,7 +633,12 @@ final class AppState: ObservableObject {
 
     private func loadLastSession() {
         Task {
-            self.lastScanSession = try? await fileRepository.latestScanSession()
+            // Prefer the latest completed session; fall back to any session with data
+            if let completed = try? await fileRepository.latestCompletedScanSession() {
+                self.lastScanSession = completed
+            } else {
+                self.lastScanSession = try? await fileRepository.latestScanSession()
+            }
             if let session = lastScanSession {
                 self.scanRootPath = URL(fileURLWithPath: session.rootPath)
                 if session.completedAt != nil {

@@ -53,6 +53,33 @@ actor FileRepository {
         }
     }
 
+    func latestCompletedScanSession() throws -> ScanSession? {
+        try database.dbPool.read { db in
+            try ScanSession
+                .filter(Column("completed_at") != nil)
+                .order(Column("started_at").desc)
+                .fetchOne(db)
+        }
+    }
+
+    func deleteFilesFromPreviousSessions(currentSessionId: Int64) throws {
+        try database.dbPool.write { db in
+            try db.execute(
+                sql: "DELETE FROM files WHERE scan_session_id != ?",
+                arguments: [currentSessionId]
+            )
+        }
+    }
+
+    func deleteOldSessions(keepingId: Int64) throws {
+        try database.dbPool.write { db in
+            try db.execute(
+                sql: "DELETE FROM scan_sessions WHERE id != ?",
+                arguments: [keepingId]
+            )
+        }
+    }
+
     // MARK: - File Operations
 
     func insertFilesBatch(_ files: [FileNode]) throws {
@@ -153,9 +180,13 @@ actor FileRepository {
     func rootNode() throws -> FileNode? {
         try database.dbPool.read { db in
             // Primary: parent_path IS NULL (normal case)
-            // Fallback: FSEvents can overwrite root's parent_path to "/.."
+            // Fallback: parent_path can be empty string or "/.." depending on scan path
             try FileNode
                 .filter(Column("parent_path") == nil)
+                .fetchOne(db)
+            ?? FileNode
+                .filter(Column("parent_path") == "")
+                .filter(Column("is_directory") == true)
                 .fetchOne(db)
             ?? FileNode
                 .filter(Column("parent_path") == "/..")
@@ -269,14 +300,15 @@ actor FileRepository {
         }
     }
 
-    func duplicateGroups() throws -> [DuplicateGroup] {
+    func duplicateGroups(limit: Int = 100) throws -> [DuplicateGroup] {
         try database.dbPool.read { db in
             let hashes = try Row.fetchAll(db, sql: """
                 SELECT content_hash, size FROM files
                 WHERE is_directory = 0 AND content_hash IS NOT NULL
                 GROUP BY content_hash HAVING COUNT(*) > 1
                 ORDER BY size * COUNT(*) DESC
-                """)
+                LIMIT ?
+                """, arguments: [limit])
 
             var groups: [DuplicateGroup] = []
             for row in hashes {
@@ -291,6 +323,58 @@ actor FileRepository {
                 }
             }
             return groups
+        }
+    }
+
+    /// Returns paths of all files that are duplicates (share a content_hash with another file).
+    /// SQL-only — avoids loading full FileNode/DuplicateGroup objects into memory.
+    func duplicateFilePaths() throws -> Set<String> {
+        try database.dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT path FROM files
+                WHERE is_directory = 0 AND content_hash IN (
+                    SELECT content_hash FROM files
+                    WHERE is_directory = 0 AND content_hash IS NOT NULL
+                    GROUP BY content_hash HAVING COUNT(*) > 1
+                )
+                """)
+            return Set(rows.compactMap { $0["path"] as String? })
+        }
+    }
+
+    /// Returns paths of stale files matching the given criteria.
+    /// SQL-only — avoids loading full FileNode objects into memory.
+    func staleFilePaths(accessedBefore cutoff: Double, minSize: Int64 = 1_048_576) throws -> Set<String> {
+        try database.dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT path FROM files
+                WHERE is_directory = 0
+                  AND accessed_at IS NOT NULL
+                  AND accessed_at < ?
+                  AND size >= ?
+                """, arguments: [cutoff, minSize])
+            return Set(rows.compactMap { $0["path"] as String? })
+        }
+    }
+
+    /// Returns paths of files matching any of the given LIKE patterns (cache detection).
+    /// SQL-only — avoids loading full CacheDetector pipeline.
+    func cacheMatchingPaths(patterns: [String]) throws -> Set<String> {
+        guard !patterns.isEmpty else { return [] }
+        return try database.dbPool.read { db in
+            var paths = Set<String>()
+            for pattern in patterns {
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT path FROM files
+                    WHERE path LIKE ? AND is_directory = 0
+                    """, arguments: [pattern])
+                for row in rows {
+                    if let path: String = row["path"] {
+                        paths.insert(path)
+                    }
+                }
+            }
+            return paths
         }
     }
 
@@ -367,6 +451,34 @@ actor FileRepository {
         }
     }
 
+    // MARK: - Incremental Sync Helpers
+
+    /// Lightweight map of all file paths → modifiedAt for incremental comparison.
+    /// Uses Row cursor to avoid loading full FileNode objects into memory.
+    nonisolated func existingFileModifiedTimes() throws -> [String: Double?] {
+        try database.dbPool.read { db in
+            var result: [String: Double?] = [:]
+            let cursor = try Row.fetchCursor(db, sql: "SELECT path, modified_at FROM files")
+            while let row = try cursor.next() {
+                let path: String = row["path"]
+                let modifiedAt: Double? = row["modified_at"]
+                result[path] = modifiedAt
+            }
+            return result
+        }
+    }
+
+    /// Update session's completedAt timestamp without modifying other fields.
+    /// Used after incremental sync to mark the session as fresh (prevents re-triggering stale check).
+    func updateSessionCompletedAt(id: Int64) throws {
+        try database.dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE scan_sessions SET completed_at = ? WHERE id = ?",
+                arguments: [Date().timeIntervalSince1970, id]
+            )
+        }
+    }
+
     // MARK: - Concurrent Read Access
 
     /// Nonisolated read methods that bypass actor serialization for read-only queries.
@@ -378,6 +490,10 @@ actor FileRepository {
         try database.dbPool.read { db in
             try FileNode
                 .filter(Column("parent_path") == nil)
+                .fetchOne(db)
+            ?? FileNode
+                .filter(Column("parent_path") == "")
+                .filter(Column("is_directory") == true)
                 .fetchOne(db)
             ?? FileNode
                 .filter(Column("parent_path") == "/..")
@@ -468,6 +584,15 @@ actor FileRepository {
         }
     }
 
+    func allFiles(forSession sessionId: Int64, limit: Int, offset: Int) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode.filter(Column("scan_session_id") == sessionId)
+                .order(Column("path"))
+                .limit(limit, offset: offset)
+                .fetchAll(db)
+        }
+    }
+
     // MARK: - Search
 
     func searchFiles(query: String, limit: Int = 100) throws -> [FileNode] {
@@ -482,15 +607,6 @@ actor FileRepository {
     }
 
     // MARK: - Smart Cleanup
-
-    func nonDirectoryFiles(forSession sessionId: Int64) throws -> [FileNode] {
-        try database.dbPool.read { db in
-            try FileNode
-                .filter(Column("scan_session_id") == sessionId)
-                .filter(Column("is_directory") == false)
-                .fetchAll(db)
-        }
-    }
 
     func nonDirectoryFileCount(forSession sessionId: Int64) throws -> Int {
         try database.dbPool.read { db in
