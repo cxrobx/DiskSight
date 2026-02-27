@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 enum SidebarSection: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case visualization = "Visualization"
+    case growth = "Recent Growth"
     case duplicates = "Duplicates"
     case staleFiles = "Stale Files"
     case cache = "Cache"
@@ -16,6 +17,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "gauge.with.dots.needle.33percent"
         case .visualization: return "square.grid.3x3.fill"
+        case .growth: return "chart.line.uptrend.xyaxis"
         case .duplicates: return "doc.on.doc"
         case .staleFiles: return "clock.arrow.circlepath"
         case .cache: return "internaldrive"
@@ -45,10 +47,16 @@ struct ScanProgress: Sendable {
     var filesScanned: Int = 0
     var totalSize: Int64 = 0
     var currentPath: String = ""
+    var completed: Bool = false
 }
 
 @MainActor
 final class AppState: ObservableObject {
+    nonisolated static func syncCompletedSuccessfully(taskIsCancelled: Bool, lastProgress: ScanProgress?) -> Bool {
+        guard !taskIsCancelled else { return false }
+        return lastProgress?.completed ?? false
+    }
+
     @Published var selectedSection: SidebarSection = .overview
     @Published var scanState: ScanState = .idle
     @Published var scanRootPath: URL?
@@ -63,6 +71,12 @@ final class AppState: ObservableObject {
     /// Incremented each time FSEvents batch processing completes.
     /// Views can observe this to refresh stale data (e.g., folder tree sizes).
     @Published var dataVersion: Int = 0
+    @Published var hideExternalDrives: Bool = UserDefaults.standard.bool(forKey: "hideExternalDrives") {
+        didSet {
+            UserDefaults.standard.set(hideExternalDrives, forKey: "hideExternalDrives")
+            Task { await refreshVisibilityFilteredData() }
+        }
+    }
 
     // MARK: - Cached Data (survives tab switches)
 
@@ -86,6 +100,13 @@ final class AppState: ObservableObject {
     // Cache
     @Published var detectedCaches: [DetectedCache]?
 
+    // Growth
+    @Published var growthFolders: [FolderGrowth]?
+    @Published var growthPeriod: GrowthPeriod = .thirtyDays
+    @Published var growthLoadingPeriod: GrowthPeriod?
+    private var growthCache: [GrowthPeriod: [FolderGrowth]] = [:]
+    private var growthCacheDataVersion: Int = -1
+
     // Smart Cleanup
     @Published var cleanupRecommendations: [CleanupRecommendation]?
     @Published var cleanupSummary: CleanupSummary?
@@ -97,6 +118,8 @@ final class AppState: ObservableObject {
 
     private var scanTask: Task<Void, Never>?
     private var incrementalSyncTask: Task<Void, Never>?
+    private var cachePrefetchTask: Task<Void, Never>?
+    private var growthPrefetchTask: Task<Void, Never>?
     private let database: Database
     let fileRepository: FileRepository
     private var fsMonitor: FSEventsMonitor?
@@ -110,6 +133,8 @@ final class AppState: ObservableObject {
         self.fileRepository = FileRepository(database: database)
         checkFullDiskAccess()
         loadLastSession()
+        scheduleCacheWarmup()
+        scheduleGrowthWarmup()
 
         // Save event ID synchronously on app quit — can't await in notification handlers
         terminationObserver = NotificationCenter.default.addObserver(
@@ -135,12 +160,16 @@ final class AppState: ObservableObject {
     func startScan(at url: URL) {
         scanTask?.cancel()
         incrementalSyncTask?.cancel()
+        cachePrefetchTask?.cancel()
+        growthPrefetchTask?.cancel()
         stopMonitoring()
 
         // Reset viz state — full scan means starting fresh
         vizChildNodes = []
         vizCurrentPath = nil
         vizBreadcrumbs = []
+        growthFolders = nil
+        growthCache = [:]
 
         invalidateCache()
         scanState = .scanning(progress: ScanProgress())
@@ -162,8 +191,10 @@ final class AppState: ObservableObject {
                 // Clean up files and sessions from previous scans
                 try? await fileRepository.deleteFilesFromPreviousSessions(currentSessionId: sessionId)
                 try? await fileRepository.deleteOldSessions(keepingId: sessionId)
-                self.lastScanSession = try await fileRepository.latestScanSession()
+                self.lastScanSession = try fileRepository.latestScanSession()
                 self.scanState = .completed
+                self.scheduleCacheWarmup()
+                self.scheduleGrowthWarmup()
 
                 // Start monitoring after scan completes
                 startMonitoring(path: url.path)
@@ -215,6 +246,8 @@ final class AppState: ObservableObject {
                 if let monitor = self.fsMonitor,
                    let session = self.lastScanSession, let sessionId = session.id {
                     let eventId = monitor.currentEventId
+                    // Update in-memory session so handleBecameActive uses fresh event ID
+                    self.lastScanSession?.lastFseventsId = Int64(eventId)
                     Task {
                         try? await self.fileRepository.updateEventId(
                             sessionId: sessionId,
@@ -224,9 +257,11 @@ final class AppState: ObservableObject {
                 }
             }
 
-        // Subscribe to rescan requests (MustScanSubDirs)
+        // Subscribe to rescan requests (MustScanSubDirs).
+        // Debounce: FSEvents replay can fire dozens of MustScanSubDirs callbacks in rapid
+        // succession. Without debounce, each one cancels+restarts quickSync on main thread.
         rescanCancellable = monitor.rescanSubject
-            .receive(on: DispatchQueue.main)
+            .debounce(for: .seconds(3), scheduler: DispatchQueue.main)
             .sink { [weak self] in
                 self?.triggerQuickRescan()
             }
@@ -248,8 +283,8 @@ final class AppState: ObservableObject {
                 // Start monitoring from "now" to capture new changes while sync runs
                 monitor.start(path: path, sinceEventId: UInt64(kFSEventStreamEventIdSinceNow))
                 isMonitoring = true
-                // Incremental sync catches the gap since the last session
-                runIncrementalSync(path: path)
+                // Full walk catches the gap since the last session (>7 days stale)
+                runIncrementalSync(path: path, fullWalk: true)
                 return
             }
         }
@@ -287,29 +322,53 @@ final class AppState: ObservableObject {
     /// is detected or when the saved event ID is likely stale.
     private func triggerQuickRescan() {
         guard let rootPath = scanRootPath else { return }
+        // Skip if session is very fresh — FSEvents will catch any changes going forward.
+        // MustScanSubDirs during initial replay doesn't mean data is stale; it just means
+        // the kernel can't guarantee individual event paths.
+        if let completedAt = lastScanSession?.completedAt {
+            let fiveMinutesAgo = Date().timeIntervalSince1970 - 300
+            if completedAt > fiveMinutesAgo { return }
+        }
         runIncrementalSync(path: rootPath.path)
     }
 
     /// Background incremental sync — walks the filesystem and upserts only new/modified
     /// files, deletes removed ones. Does NOT change scanState, so the UI stays usable
     /// with existing viz data during the sync.
-    private func runIncrementalSync(path: String) {
+    /// - Parameter fullWalk: When true, uses iterative DFS without mtime pruning (for stale >7 day gaps).
+    ///   When false (default), uses fast quickSync with mtime pruning.
+    private func runIncrementalSync(path: String, fullWalk: Bool = false) {
         incrementalSyncTask?.cancel()
         guard let session = lastScanSession, let sessionId = session.id else { return }
         isSyncing = true
 
-        incrementalSyncTask = Task {
+        incrementalSyncTask = Task(priority: .low) {
             let scanner = FileScanner(repository: fileRepository)
             let rootURL = URL(fileURLWithPath: path)
-            let stream = scanner.incrementalScan(rootURL: rootURL, sessionId: sessionId)
-            for await _ in stream {
-                // Progress consumed silently — no scanning UI state change
+            var lastProgress: ScanProgress?
+
+            if fullWalk {
+                // >7 day stale path — full walk (iterative DFS, no mtime pruning)
+                let stream = scanner.incrementalScan(rootURL: rootURL, sessionId: sessionId)
+                for await progress in stream { lastProgress = progress }
+            } else {
+                // Normal path — fast quickSync with mtime pruning
+                let since = session.completedAt ?? 0
+                let stream = scanner.quickSync(rootURL: rootURL, since: since, sessionId: sessionId)
+                for await progress in stream { lastProgress = progress }
             }
 
-            // Update session timestamp to prevent re-triggering stale check
-            try? await fileRepository.updateSessionCompletedAt(id: sessionId)
-            self.lastScanSession = try? await fileRepository.latestScanSession()
-
+            // Only mark session fresh if sync completed successfully
+            let syncSuccess = Self.syncCompletedSuccessfully(
+                taskIsCancelled: Task.isCancelled,
+                lastProgress: lastProgress
+            )
+            guard syncSuccess else {
+                self.isSyncing = false
+                return
+            }
+            try? await fileRepository.updateSessionStats(id: sessionId)
+            self.lastScanSession = try? fileRepository.latestCompletedScanSession()
             self.invalidateCache()
             self.dataVersion += 1
             await self.refreshVisualizationData()
@@ -321,6 +380,15 @@ final class AppState: ObservableObject {
     /// the FSEvents stream died. Cache invalidation happens naturally via
     /// the FSEvents sink when real changes are detected.
     func handleBecameActive() {
+        // Only re-query if we have no session — avoids a redundant DB hit on every cmd-tab
+        if lastScanSession == nil {
+            if let session = try? fileRepository.latestCompletedScanSession() {
+                self.lastScanSession = session
+                self.scanRootPath = URL(fileURLWithPath: session.rootPath)
+                scheduleCacheWarmup()
+                scheduleGrowthWarmup()
+            }
+        }
         if let rootPath = lastScanSession?.rootPath, !(fsMonitor?.running ?? false) {
             startMonitoring(path: rootPath)
         }
@@ -361,37 +429,59 @@ final class AppState: ObservableObject {
     func loadOverviewData() async {
         guard overviewFileCount == nil else { return }
         do {
-            overviewFileCount = try await fileRepository.fileCount()
-            overviewTotalSize = try await fileRepository.totalSize()
-            if let root = try fileRepository.rootNodeConcurrent() {
-                overviewTopFolders = try fileRepository.childrenWithSizesConcurrent(ofPath: root.path)
-                    .filter { $0.isDirectory }
-                    .prefix(10)
-                    .map { $0 }
+            if let session = lastScanSession, let sessionId = session.id {
+                // Use pre-computed session stats — avoids full-table scan on cold launch
+                if let count = session.fileCount {
+                    overviewFileCount = count
+                } else {
+                    overviewFileCount = try fileRepository.fileCount(sessionId: sessionId)
+                }
+                if let indexed = session.indexedSize {
+                    overviewTotalSize = indexed
+                } else {
+                    overviewTotalSize = try fileRepository.totalSize(sessionId: sessionId)
+                }
+                if let root = try fileRepository.rootNodeConcurrent() {
+                    overviewTopFolders = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: root.path))
+                        .filter { $0.isDirectory }
+                        .prefix(10)
+                        .map { $0 }
+                }
+            } else {
+                // No session yet (first launch / no scan) — resolve session then leave nils for empty state
+                if lastScanSession == nil {
+                    lastScanSession = try? fileRepository.latestCompletedScanSession()
+                }
             }
-            if lastScanSession == nil {
-                lastScanSession = try await fileRepository.latestScanSession()
-            }
-        } catch {}
+        } catch {
+            #if DEBUG
+            print("[AppState] loadOverviewData error: \(error)")
+            #endif
+        }
     }
 
     func loadVisualizationRoot() async {
         guard vizChildNodes.isEmpty else { return }
         do {
-            if let currentPath = vizCurrentPath {
+            if let currentPath = vizCurrentPath, shouldIncludePath(currentPath) {
                 // Reload data for current drill-down position (preserves navigation after cache invalidation)
-                vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: currentPath)
+                vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: currentPath))
             } else if let root = try fileRepository.rootNodeConcurrent() {
                 // First load — navigate to root
                 vizCurrentPath = root.path
-                vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: root.path)
+                vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: root.path))
                 vizBreadcrumbs = []
             }
-        } catch {}
+        } catch {
+            #if DEBUG
+            print("[AppState] loadVisualizationRoot error: \(error)")
+            #endif
+        }
     }
 
     func vizDrillDown(to node: FileNode) async {
         guard node.isDirectory else { return }
+        guard shouldIncludePath(node.path) else { return }
 
         if let currentPath = vizCurrentPath {
             let name = vizBreadcrumbs.isEmpty
@@ -404,20 +494,24 @@ final class AppState: ObservableObject {
 
         vizCurrentPath = node.path
         do {
-            vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: node.path)
+            vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: node.path))
         } catch {
             vizChildNodes = []
         }
     }
 
     func vizNavigateTo(_ crumb: BreadcrumbItem) async {
+        guard shouldIncludePath(crumb.path) else {
+            await vizNavigateToRoot()
+            return
+        }
         if let index = vizBreadcrumbs.firstIndex(where: { $0.id == crumb.id }) {
             vizBreadcrumbs = Array(vizBreadcrumbs.prefix(index))
         }
 
         vizCurrentPath = crumb.path
         do {
-            vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: crumb.path)
+            vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: crumb.path))
         } catch {
             vizChildNodes = []
         }
@@ -426,6 +520,10 @@ final class AppState: ObservableObject {
     /// Navigate to an arbitrary path, rebuilding breadcrumbs from the scan root down.
     /// Used by the folder tree sidebar to jump multiple levels at once.
     func vizNavigateToPath(_ targetPath: String) async {
+        guard shouldIncludePath(targetPath) else {
+            await vizNavigateToRoot()
+            return
+        }
         guard let rootPath = try? fileRepository.rootNodeConcurrent()?.path else { return }
 
         // If navigating to root, just reset
@@ -457,7 +555,7 @@ final class AppState: ObservableObject {
             for i in 0..<components.count {
                 currentURL = currentURL.appendingPathComponent(String(components[i]))
                 let ancestorPath = currentURL.path
-                if ancestorPath != targetPath {
+                if ancestorPath != targetPath, shouldIncludePath(ancestorPath) {
                     crumbs.append(BreadcrumbItem(
                         id: ancestorPath,
                         name: String(components[i]),
@@ -470,7 +568,7 @@ final class AppState: ObservableObject {
         vizBreadcrumbs = crumbs
         vizCurrentPath = targetPath
         do {
-            vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: targetPath)
+            vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: targetPath))
         } catch {
             vizChildNodes = []
         }
@@ -497,6 +595,61 @@ final class AppState: ObservableObject {
         detectedCaches = (try? await detector.detectCaches()) ?? []
     }
 
+    /// Synchronous period switch — instant for cache hits, spawns async load for misses.
+    func switchGrowthPeriod(to period: GrowthPeriod) {
+        ensureGrowthCacheFreshForCurrentDataVersion()
+        growthPeriod = period
+        if let cached = growthCache[period] {
+            growthFolders = visibleGrowthFolders(cached)
+            growthLoadingPeriod = nil
+            return
+        }
+        growthLoadingPeriod = period
+        growthFolders = nil
+        // Cache miss — load in background
+        Task {
+            let results = await loadGrowthPeriod(period, forceRefresh: false)
+            if growthPeriod == period {
+                growthFolders = visibleGrowthFolders(results)
+            }
+            if growthLoadingPeriod == period {
+                growthLoadingPeriod = nil
+            }
+        }
+    }
+
+    /// Initial load — async, for .task on first appearance.
+    func loadGrowthData() async {
+        ensureGrowthCacheFreshForCurrentDataVersion()
+        guard growthFolders == nil else { return }
+        let period = growthPeriod
+        growthLoadingPeriod = period
+        let results = await loadGrowthPeriod(period, forceRefresh: false)
+        if growthPeriod == period {
+            growthFolders = visibleGrowthFolders(results)
+        }
+        if growthLoadingPeriod == period {
+            growthLoadingPeriod = nil
+        }
+    }
+
+    /// Reload growth data in-place without clearing first (prevents blank frame flicker).
+    /// Only refreshes the current period — other cached periods stay until next switch
+    /// (minimal staleness, avoids wiping cache on every FSEvents batch).
+    /// Full cache clear happens in startScan() when data truly changes.
+    func refreshGrowthData() async {
+        ensureGrowthCacheFreshForCurrentDataVersion()
+        let period = growthPeriod
+        growthLoadingPeriod = period
+        let results = await loadGrowthPeriod(period, forceRefresh: true)
+        if growthPeriod == period {
+            growthFolders = visibleGrowthFolders(results)
+        }
+        if growthLoadingPeriod == period {
+            growthLoadingPeriod = nil
+        }
+    }
+
     // MARK: - Smart Cleanup
 
     func loadSmartCleanup() async {
@@ -507,7 +660,11 @@ final class AppState: ObservableObject {
             guard !records.isEmpty else { return } // Leave nil so view shows "Analyze" prompt
             cleanupRecommendations = records.map { $0.toRecommendation() }
             cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
-        } catch {}
+        } catch {
+            #if DEBUG
+            print("[AppState] loadSmartCleanup error: \(error)")
+            #endif
+        }
     }
 
     func runSmartCleanup(useLLM: Bool = false) async {
@@ -553,7 +710,11 @@ final class AppState: ObservableObject {
 
             cleanupRecommendations = allRecs
             cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
-        } catch {}
+        } catch {
+            #if DEBUG
+            print("[AppState] runSmartCleanup error: \(error)")
+            #endif
+        }
 
         isAnalyzingCleanup = false
         cleanupProgress = nil
@@ -583,6 +744,8 @@ final class AppState: ObservableObject {
         // Remove from local recommendations
         cleanupRecommendations?.removeAll { $0.filePath == path }
         if let session = lastScanSession, let sessionId = session.id {
+            try? await fileRepository.updateSessionStats(id: sessionId)
+            self.lastScanSession = try? fileRepository.latestCompletedScanSession()
             cleanupSummary = try? await fileRepository.recommendationSummary(forSession: sessionId)
         }
         invalidateCache()
@@ -598,6 +761,8 @@ final class AppState: ObservableObject {
         }
         cleanupRecommendations?.removeAll { $0.confidence == .safe }
         if let session = lastScanSession, let sessionId = session.id {
+            try? await fileRepository.updateSessionStats(id: sessionId)
+            self.lastScanSession = try? fileRepository.latestCompletedScanSession()
             cleanupSummary = try? await fileRepository.recommendationSummary(forSession: sessionId)
         }
         invalidateCache()
@@ -612,6 +777,8 @@ final class AppState: ObservableObject {
         // because the view shows the empty state before the reload completes.
         // Instead, refreshVisualizationData() replaces the data atomically.
         // vizCurrentPath and vizBreadcrumbs are navigation state, not cached data.
+        // growthFolders is NOT cleared here for the same reason — refreshGrowthData()
+        // replaces data atomically. Cleared explicitly in startScan() for new scans.
         duplicateGroups = nil
         staleFiles = nil
         detectedCaches = nil
@@ -622,30 +789,126 @@ final class AppState: ObservableObject {
     /// Reload viz data in-place without clearing first (prevents blank frame flicker)
     func refreshVisualizationData() async {
         do {
-            if let currentPath = vizCurrentPath {
-                vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: currentPath)
+            if let currentPath = vizCurrentPath, shouldIncludePath(currentPath) {
+                vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: currentPath))
             } else if let root = try fileRepository.rootNodeConcurrent() {
                 vizCurrentPath = root.path
-                vizChildNodes = try fileRepository.childrenWithSizesConcurrent(ofPath: root.path)
+                vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: root.path))
+                if !shouldIncludePath(vizCurrentPath ?? root.path) {
+                    vizCurrentPath = root.path
+                    vizBreadcrumbs = []
+                }
             }
         } catch {}
     }
 
-    private func loadLastSession() {
-        Task {
-            // Prefer the latest completed session; fall back to any session with data
-            if let completed = try? await fileRepository.latestCompletedScanSession() {
-                self.lastScanSession = completed
-            } else {
-                self.lastScanSession = try? await fileRepository.latestScanSession()
+    private func loadGrowthPeriod(_ period: GrowthPeriod, forceRefresh: Bool) async -> [FolderGrowth] {
+        ensureGrowthCacheFreshForCurrentDataVersion()
+        if !forceRefresh {
+            if let cached = growthCache[period] {
+                return cached
             }
-            if let session = lastScanSession {
-                self.scanRootPath = URL(fileURLWithPath: session.rootPath)
-                if session.completedAt != nil {
-                    self.scanState = .completed
-                    startMonitoring(path: session.rootPath)
-                }
+            if let sessionId = lastScanSession?.id,
+               let persisted = try? await fileRepository.cachedGrowthFolders(sessionId: sessionId, period: period) {
+                growthCache[period] = persisted
+                return persisted
             }
         }
+
+        let cutoff = period.cutoffDate.timeIntervalSince1970
+        let excludePrefix = hideExternalDrives ? "/Volumes/" : nil
+        let results = (try? await fileRepository.recentlyGrowingFolders(createdAfter: cutoff, excludePrefix: excludePrefix)) ?? []
+        growthCache[period] = results
+        if let sessionId = lastScanSession?.id {
+            try? await fileRepository.upsertGrowthCache(sessionId: sessionId, period: period, folders: results)
+        }
+        return results
+    }
+
+    private func scheduleGrowthWarmup() {
+        guard lastScanSession?.id != nil else { return }
+
+        ensureGrowthCacheFreshForCurrentDataVersion()
+        growthPrefetchTask?.cancel()
+        growthPrefetchTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+
+            let selectedPeriod = self.growthPeriod
+            let selectedResults = await self.loadGrowthPeriod(selectedPeriod, forceRefresh: true)
+            if self.growthPeriod == selectedPeriod && self.growthFolders == nil {
+                self.growthFolders = self.visibleGrowthFolders(selectedResults)
+            }
+
+            for period in GrowthPeriod.allCases where period != selectedPeriod {
+                if Task.isCancelled { return }
+                _ = await self.loadGrowthPeriod(period, forceRefresh: true)
+            }
+        }
+    }
+
+    private func scheduleCacheWarmup() {
+        guard lastScanSession?.id != nil else { return }
+        guard detectedCaches == nil else { return }
+
+        cachePrefetchTask?.cancel()
+        cachePrefetchTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.loadCacheData()
+        }
+    }
+
+    private func loadLastSession() {
+        // Synchronous — nonisolated reads bypass actor, no Task needed
+        if let completed = try? fileRepository.latestCompletedScanSession() {
+            self.lastScanSession = completed
+        } else {
+            self.lastScanSession = try? fileRepository.latestScanSession()
+        }
+        if let session = lastScanSession {
+            self.scanRootPath = URL(fileURLWithPath: session.rootPath)
+            if session.completedAt != nil {
+                self.scanState = .completed
+                startMonitoring(path: session.rootPath)
+            }
+        }
+    }
+
+    private func refreshVisibilityFilteredData() async {
+        do {
+            if let root = try fileRepository.rootNodeConcurrent() {
+                let top = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: root.path))
+                    .filter { $0.isDirectory }
+                    .prefix(10)
+                    .map { $0 }
+                overviewTopFolders = top
+            }
+        } catch {}
+
+        await refreshVisualizationData()
+
+        // Growth cache stores SQL-filtered results — must re-query with new excludePrefix
+        growthCache = [:]
+        await refreshGrowthData()
+    }
+
+    private func ensureGrowthCacheFreshForCurrentDataVersion() {
+        if growthCacheDataVersion != dataVersion {
+            growthCache = [:]
+            growthCacheDataVersion = dataVersion
+        }
+    }
+
+    func shouldIncludePath(_ path: String) -> Bool {
+        guard hideExternalDrives else { return true }
+        if path == "/Volumes" { return false }
+        return !path.hasPrefix("/Volumes/")
+    }
+
+    private func visibleFileNodes(_ nodes: [FileNode]) -> [FileNode] {
+        nodes.filter { shouldIncludePath($0.path) }
+    }
+
+    private func visibleGrowthFolders(_ folders: [FolderGrowth]) -> [FolderGrowth] {
+        folders.filter { shouldIncludePath($0.folderPath) }
     }
 }

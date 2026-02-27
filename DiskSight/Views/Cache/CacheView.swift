@@ -3,6 +3,7 @@ import SwiftUI
 struct CacheView: View {
     @EnvironmentObject var appState: AppState
     @State private var isLoading = false
+    @State private var isCleaning = false
 
     private var detectedCaches: [DetectedCache] { appState.detectedCaches ?? [] }
     @State private var showConfirmClean = false
@@ -54,7 +55,7 @@ struct CacheView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             if let cache = cacheToClean {
-                Text("Delete \(cache.matchedPaths.count) items (\(SizeFormatter.format(cache.totalSize))) from \(cache.pattern.pattern)?")
+                Text("Delete \(cache.matchCount) items (\(SizeFormatter.format(cache.totalSize))) from \(cache.pattern.pattern)?")
             }
         }
     }
@@ -84,6 +85,7 @@ struct CacheView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .controlSize(.small)
+                .disabled(isCleaning)
             }
 
             Button {
@@ -97,6 +99,7 @@ struct CacheView: View {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
             .controlSize(.small)
+            .disabled(isLoading || isCleaning)
         }
     }
 
@@ -192,27 +195,37 @@ struct CacheView: View {
 
     private func cleanCache(_ cache: DetectedCache) {
         Task {
-            for path in cache.matchedPaths {
+            isCleaning = true
+            let detector = CacheDetector(repository: appState.fileRepository)
+            let paths = (try? await detector.allMatchingPaths(for: cache.pattern)) ?? []
+            for path in paths {
                 let url = URL(fileURLWithPath: path)
                 try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
                 try? await appState.fileRepository.deleteFile(path: path)
             }
             appState.invalidateCache()
             await detectCaches()
+            isCleaning = false
         }
     }
 
     private func cleanAllSafe() {
         Task {
+            isCleaning = true
+            let detector = CacheDetector(repository: appState.fileRepository)
+            var uniquePaths = Set<String>()
             for cache in safeCaches {
-                for path in cache.matchedPaths {
-                    let url = URL(fileURLWithPath: path)
-                    try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                    try? await appState.fileRepository.deleteFile(path: path)
-                }
+                let paths = (try? await detector.allMatchingPaths(for: cache.pattern)) ?? []
+                uniquePaths.formUnion(paths)
+            }
+            for path in uniquePaths {
+                let url = URL(fileURLWithPath: path)
+                try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                try? await appState.fileRepository.deleteFile(path: path)
             }
             appState.invalidateCache()
             await detectCaches()
+            isCleaning = false
         }
     }
 }
@@ -263,15 +276,15 @@ struct CacheCard: View {
 
                 if isExpanded {
                     Divider()
-                    ForEach(cache.matchedPaths.prefix(20), id: \.self) { path in
+                    ForEach(cache.previewPaths, id: \.self) { path in
                         Text(path)
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    if cache.matchedPaths.count > 20 {
-                        Text("... and \(cache.matchedPaths.count - 20) more")
+                    if cache.matchCount > cache.previewPaths.count {
+                        Text("... and \(cache.matchCount - cache.previewPaths.count) more")
                             .font(.caption2)
                             .foregroundStyle(.quaternary)
                     }

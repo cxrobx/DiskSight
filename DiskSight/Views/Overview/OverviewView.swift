@@ -186,15 +186,26 @@ struct OverviewView: View {
                     appState.exportCSV()
                 } label: {
                     VStack(spacing: 6) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.title2)
-                        Text("Export CSV")
+                        if appState.isExportingCSV {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(height: 22)
+                        } else if appState.csvExportDone {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.title2)
+                                .foregroundStyle(.green)
+                        } else {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.title2)
+                        }
+                        Text(appState.isExportingCSV ? "Exporting..." : appState.csvExportDone ? "Exported!" : "Export CSV")
                             .font(.caption)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(appState.isExportingCSV)
             }
             .padding(8)
         }

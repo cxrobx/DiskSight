@@ -14,18 +14,22 @@ class FolderTreeNode: ObservableObject, Identifiable {
         self.depth = depth
     }
 
-    func loadChildren(using repository: FileRepository) async {
+    func loadChildren(using repository: FileRepository, pathFilter: ((String) -> Bool)? = nil) async {
         guard children == nil else { return }
         do {
             let dirChildren = try repository.directoryChildrenConcurrent(ofPath: fileNode.path)
-            children = dirChildren.map { FolderTreeNode(fileNode: $0, depth: depth + 1) }
+            let filtered = dirChildren.filter { node in
+                pathFilter?(node.path) ?? true
+            }
+            children = filtered.map { FolderTreeNode(fileNode: $0, depth: depth + 1) }
         } catch {
             children = []
         }
     }
 
     /// Walk from this node down to targetPath, expanding each ancestor and loading children as needed.
-    func expandTo(targetPath: String, using repository: FileRepository) async {
+    func expandTo(targetPath: String, using repository: FileRepository, pathFilter: ((String) -> Bool)? = nil) async {
+        guard pathFilter?(targetPath) ?? true else { return }
         // If this node IS the target, we're done
         guard targetPath != fileNode.path else { return }
 
@@ -34,7 +38,7 @@ class FolderTreeNode: ObservableObject, Identifiable {
         guard targetPath.hasPrefix(prefix) else { return }
 
         // Ensure children are loaded
-        await loadChildren(using: repository)
+        await loadChildren(using: repository, pathFilter: pathFilter)
         isExpanded = true
 
         // Find the child that is an ancestor of (or is) the target
@@ -42,7 +46,7 @@ class FolderTreeNode: ObservableObject, Identifiable {
         for child in children {
             let childPrefix = child.fileNode.path.hasSuffix("/") ? child.fileNode.path : child.fileNode.path + "/"
             if targetPath == child.fileNode.path || targetPath.hasPrefix(childPrefix) {
-                await child.expandTo(targetPath: targetPath, using: repository)
+                await child.expandTo(targetPath: targetPath, using: repository, pathFilter: pathFilter)
                 return
             }
         }

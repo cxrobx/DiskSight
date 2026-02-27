@@ -3,6 +3,7 @@ import GRDB
 
 actor FileRepository {
     private let database: Database
+    private let growthCacheVersion = 2
 
     init(database: Database) {
         self.database = database
@@ -28,24 +29,28 @@ actor FileRepository {
     func completeScanSession(id: Int64) throws {
         try database.dbPool.write { db in
             let stats = try Row.fetchOne(db, sql: """
-                SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total
+                SELECT
+                  COUNT(CASE WHEN is_directory = 0 THEN 1 END) as count,
+                  COALESCE(SUM(size), 0) as total,
+                  COALESCE(SUM(CASE WHEN is_directory = 0 THEN size ELSE 0 END), 0) as indexed
                 FROM files WHERE scan_session_id = ?
                 """, arguments: [id])
 
             try db.execute(sql: """
                 UPDATE scan_sessions
-                SET completed_at = ?, file_count = ?, total_size = ?
+                SET completed_at = ?, file_count = ?, total_size = ?, indexed_size = ?
                 WHERE id = ?
                 """, arguments: [
                     Date().timeIntervalSince1970,
                     stats?["count"] ?? 0,
                     stats?["total"] ?? 0,
+                    stats?["indexed"] ?? 0,
                     id
                 ])
         }
     }
 
-    func latestScanSession() throws -> ScanSession? {
+    nonisolated func latestScanSession() throws -> ScanSession? {
         try database.dbPool.read { db in
             try ScanSession
                 .order(Column("started_at").desc)
@@ -53,7 +58,7 @@ actor FileRepository {
         }
     }
 
-    func latestCompletedScanSession() throws -> ScanSession? {
+    nonisolated func latestCompletedScanSession() throws -> ScanSession? {
         try database.dbPool.read { db in
             try ScanSession
                 .filter(Column("completed_at") != nil)
@@ -96,15 +101,36 @@ actor FileRepository {
         }
     }
 
-    func fileCount() throws -> Int {
+    nonisolated func fileCount() throws -> Int {
         try database.dbPool.read { db in
             try FileNode.fetchCount(db)
         }
     }
 
-    func totalSize() throws -> Int64 {
+    nonisolated func totalSize() throws -> Int64 {
         try database.dbPool.read { db in
             let row = try Row.fetchOne(db, sql: "SELECT COALESCE(SUM(size), 0) as total FROM files WHERE is_directory = 0")
+            return row?["total"] ?? 0
+        }
+    }
+
+    /// Session-scoped non-directory file count. Uses idx_files_session_size covering index.
+    nonisolated func fileCount(sessionId: Int64) throws -> Int {
+        try database.dbPool.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM files
+                WHERE scan_session_id = ? AND is_directory = 0
+                """, arguments: [sessionId]) ?? 0
+        }
+    }
+
+    /// Session-scoped total size of non-directory files. Uses idx_files_session_size covering index.
+    nonisolated func totalSize(sessionId: Int64) throws -> Int64 {
+        try database.dbPool.read { db in
+            let row = try Row.fetchOne(db, sql: """
+                SELECT COALESCE(SUM(size), 0) as total
+                FROM files WHERE scan_session_id = ? AND is_directory = 0
+                """, arguments: [sessionId])
             return row?["total"] ?? 0
         }
     }
@@ -439,15 +465,38 @@ actor FileRepository {
         }
     }
 
-    func matchingPaths(likePattern: String) throws -> ([String], Int64) {
+    func matchingPathSummary(likePattern: String, previewLimit: Int = 20) throws -> ([String], Int, Int64) {
         try database.dbPool.read { db in
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT path, size FROM files
+            let summary = try Row.fetchOne(db, sql: """
+                SELECT COUNT(*) AS count, COALESCE(SUM(size), 0) AS total_size
+                FROM files
                 WHERE path LIKE ? AND is_directory = 0
                 """, arguments: [likePattern])
-            let paths = rows.compactMap { $0["path"] as String? }
-            let totalSize = rows.reduce(Int64(0)) { $0 + ($1["size"] as Int64? ?? 0) }
-            return (paths, totalSize)
+
+            let count: Int = summary?["count"] ?? 0
+            let totalSize: Int64 = summary?["total_size"] ?? 0
+
+            let previewRows = try Row.fetchAll(db, sql: """
+                SELECT path
+                FROM files
+                WHERE path LIKE ? AND is_directory = 0
+                ORDER BY size DESC
+                LIMIT ?
+                """, arguments: [likePattern, previewLimit])
+
+            let paths = previewRows.compactMap { $0["path"] as String? }
+            return (paths, count, totalSize)
+        }
+    }
+
+    func allMatchingPaths(likePattern: String) throws -> [String] {
+        try database.dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT path
+                FROM files
+                WHERE path LIKE ? AND is_directory = 0
+                """, arguments: [likePattern])
+            return rows.compactMap { $0["path"] as String? }
         }
     }
 
@@ -476,6 +525,78 @@ actor FileRepository {
                 sql: "UPDATE scan_sessions SET completed_at = ? WHERE id = ?",
                 arguments: [Date().timeIntervalSince1970, id]
             )
+        }
+    }
+
+    /// Recompute session stats (file_count, total_size, indexed_size) from the files table
+    /// and update completed_at. Called after incremental sync and file deletion mutations
+    /// so that pre-computed stats remain accurate for cold-launch reads.
+    func updateSessionStats(id: Int64) throws {
+        try database.dbPool.write { db in
+            let stats = try Row.fetchOne(db, sql: """
+                SELECT
+                  COUNT(CASE WHEN is_directory = 0 THEN 1 END) as count,
+                  COALESCE(SUM(size), 0) as total,
+                  COALESCE(SUM(CASE WHEN is_directory = 0 THEN size ELSE 0 END), 0) as indexed
+                FROM files WHERE scan_session_id = ?
+                """, arguments: [id])
+            try db.execute(sql: """
+                UPDATE scan_sessions
+                SET file_count = ?, total_size = ?, indexed_size = ?, completed_at = ?
+                WHERE id = ?
+                """, arguments: [
+                    stats?["count"] ?? 0,
+                    stats?["total"] ?? 0,
+                    stats?["indexed"] ?? 0,
+                    Date().timeIntervalSince1970,
+                    id
+                ])
+        }
+    }
+
+    /// Per-directory children lookup for quickSync — returns [path: modifiedAt] for direct children.
+    /// Nonisolated for concurrent read access (same pattern as rootNodeConcurrent).
+    nonisolated func existingChildrenModifiedTimes(parentPath: String) throws -> [String: Double?] {
+        try database.dbPool.read { db in
+            var result: [String: Double?] = [:]
+            let cursor = try Row.fetchCursor(db, sql: """
+                SELECT path, modified_at FROM files WHERE parent_path = ?
+                """, arguments: [parentPath])
+            while let row = try cursor.next() {
+                let path: String = row["path"]
+                let modifiedAt: Double? = row["modified_at"]
+                result[path] = modifiedAt
+            }
+            return result
+        }
+    }
+
+    /// Returns paths of subdirectories under a parent — used by quickSync's unchanged-directory
+    /// path to recurse via DB instead of filesystem call.
+    nonisolated func existingSubdirectoryPaths(parentPath: String) throws -> [String] {
+        try database.dbPool.read { db in
+            let cursor = try Row.fetchCursor(db, sql: """
+                SELECT path FROM files WHERE parent_path = ? AND is_directory = 1
+                """, arguments: [parentPath])
+            var paths: [String] = []
+            while let row = try cursor.next() {
+                paths.append(row["path"] as String)
+            }
+            return paths
+        }
+    }
+
+    /// Recursively delete a directory and all its descendants from the DB.
+    /// Uses substr prefix matching instead of LIKE to handle % and _ in filenames safely.
+    func deleteFilesRecursive(paths: [String]) throws {
+        guard !paths.isEmpty else { return }
+        try database.dbPool.write { db in
+            for path in paths {
+                try db.execute(sql: """
+                    DELETE FROM files WHERE path = ?1
+                    OR (length(path) > length(?1) AND substr(path, 1, length(?1) + 1) = ?1 || '/')
+                    """, arguments: [path])
+            }
         }
     }
 
@@ -590,6 +711,145 @@ actor FileRepository {
                 .order(Column("path"))
                 .limit(limit, offset: offset)
                 .fetchAll(db)
+        }
+    }
+
+    // MARK: - Growth Analysis
+
+    func recentlyGrowingFolders(createdAfter cutoff: Double, limit: Int = 50, excludePrefix: String? = nil) throws -> [FolderGrowth] {
+        try database.dbPool.read { db in
+            let likePattern = excludePrefix.map { $0 + "%" }
+            let innerExclude = likePattern != nil ? "\n                      AND parent_path NOT LIKE ?" : ""
+            let outerExclude = likePattern != nil ? "\n                  AND f_dir.path NOT LIKE ?" : ""
+            let args: StatementArguments
+            if let pat = likePattern {
+                args = [cutoff, pat, pat, limit]
+            } else {
+                args = [cutoff, limit]
+            }
+
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT
+                    f_dir.path AS folder_path,
+                    f_dir.name AS folder_name,
+                    f_dir.size AS total_folder_size,
+                    COALESCE(growth.recent_size, 0) AS recent_growth_size,
+                    COALESCE(growth.recent_count, 0) AS recent_file_count
+                FROM files f_dir
+                INNER JOIN (
+                    SELECT parent_path, SUM(size) AS recent_size, COUNT(*) AS recent_count
+                    FROM files
+                    WHERE is_directory = 0
+                      AND size > 0
+                      AND created_at IS NOT NULL
+                      AND created_at >= ?
+                      AND path NOT LIKE '/dev/%'
+                      AND (file_type IS NULL OR file_type NOT IN ('public.character-special', 'public.block-special'))\(innerExclude)
+                    GROUP BY parent_path
+                ) growth ON growth.parent_path = f_dir.path
+                WHERE f_dir.is_directory = 1\(outerExclude)
+                ORDER BY growth.recent_size DESC
+                LIMIT ?
+                """, arguments: args)
+
+            return rows.map { row in
+                FolderGrowth(
+                    folderPath: row["folder_path"],
+                    folderName: row["folder_name"],
+                    totalFolderSize: row["total_folder_size"],
+                    recentGrowthSize: row["recent_growth_size"],
+                    recentFileCount: row["recent_file_count"]
+                )
+            }
+        }
+    }
+
+    func cachedGrowthFolders(sessionId: Int64, period: GrowthPeriod) throws -> [FolderGrowth]? {
+        try database.dbPool.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT payload
+                    FROM growth_cache
+                    WHERE scan_session_id = ? AND period = ? AND cache_version = ?
+                    LIMIT 1
+                    """,
+                arguments: [sessionId, period.rawValue, growthCacheVersion]
+            ) else { return nil }
+
+            let payload: String = row["payload"]
+            guard let data = payload.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode([FolderGrowth].self, from: data)
+        }
+    }
+
+    func upsertGrowthCache(sessionId: Int64, period: GrowthPeriod, folders: [FolderGrowth]) throws {
+        let payloadData = try JSONEncoder().encode(folders)
+        guard let payload = String(data: payloadData, encoding: .utf8) else { return }
+
+        try database.dbPool.write { db in
+            try db.execute(sql: """
+                INSERT INTO growth_cache (scan_session_id, period, payload, generated_at, cache_version)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(scan_session_id, period) DO UPDATE SET
+                    payload = excluded.payload,
+                    generated_at = excluded.generated_at,
+                    cache_version = excluded.cache_version
+                """, arguments: [
+                    sessionId,
+                    period.rawValue,
+                    payload,
+                    Date().timeIntervalSince1970,
+                    growthCacheVersion
+                ])
+        }
+    }
+
+    nonisolated func recentlyGrowingFoldersConcurrent(createdAfter cutoff: Double, limit: Int = 50, excludePrefix: String? = nil) throws -> [FolderGrowth] {
+        try database.dbPool.read { db in
+            let likePattern = excludePrefix.map { $0 + "%" }
+            let innerExclude = likePattern != nil ? "\n                      AND parent_path NOT LIKE ?" : ""
+            let outerExclude = likePattern != nil ? "\n                  AND f_dir.path NOT LIKE ?" : ""
+            let args: StatementArguments
+            if let pat = likePattern {
+                args = [cutoff, pat, pat, limit]
+            } else {
+                args = [cutoff, limit]
+            }
+
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT
+                    f_dir.path AS folder_path,
+                    f_dir.name AS folder_name,
+                    f_dir.size AS total_folder_size,
+                    COALESCE(growth.recent_size, 0) AS recent_growth_size,
+                    COALESCE(growth.recent_count, 0) AS recent_file_count
+                FROM files f_dir
+                INNER JOIN (
+                    SELECT parent_path, SUM(size) AS recent_size, COUNT(*) AS recent_count
+                    FROM files
+                    WHERE is_directory = 0
+                      AND size > 0
+                      AND created_at IS NOT NULL
+                      AND created_at >= ?
+                      AND path NOT LIKE '/dev/%'
+                      AND (file_type IS NULL OR file_type NOT IN ('public.character-special', 'public.block-special'))\(innerExclude)
+                    GROUP BY parent_path
+                ) growth ON growth.parent_path = f_dir.path
+                WHERE f_dir.is_directory = 1\(outerExclude)
+                ORDER BY growth.recent_size DESC
+                LIMIT ?
+                """, arguments: args)
+
+            return rows.map { row in
+                FolderGrowth(
+                    folderPath: row["folder_path"],
+                    folderName: row["folder_name"],
+                    totalFolderSize: row["total_folder_size"],
+                    recentGrowthSize: row["recent_growth_size"],
+                    recentFileCount: row["recent_file_count"]
+                )
+            }
         }
     }
 

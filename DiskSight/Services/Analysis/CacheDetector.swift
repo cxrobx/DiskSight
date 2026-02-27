@@ -36,35 +36,38 @@ struct CachePattern: Codable, FetchableRecord, PersistableRecord, Identifiable {
 struct DetectedCache: Identifiable {
     let id = UUID()
     let pattern: CachePattern
-    let matchedPaths: [String]
+    let previewPaths: [String]
+    let matchCount: Int
     let totalSize: Int64
 }
 
 actor CacheDetector {
     private let repository: FileRepository
+    static let defaultPatterns: [(String, String, String, String)] = [
+        ("~/Library/Caches/*", "System", "green", "System and app caches — safe to clear, will regenerate"),
+        ("~/Library/Developer/Xcode/DerivedData", "Developer", "yellow", "Xcode build artifacts — safe but requires rebuild"),
+        ("**/node_modules", "Developer", "yellow", "npm/yarn packages — safe but requires reinstall"),
+        ("~/.gradle/caches", "Developer", "yellow", "Gradle build cache — safe but requires rebuild"),
+        ("~/.cargo/registry/cache", "Developer", "yellow", "Rust crate cache — safe but requires re-download"),
+        ("~/.m2/repository", "Developer", "yellow", "Maven repository — safe but requires re-download"),
+        ("~/Library/Caches/Homebrew", "Package Manager", "green", "Homebrew download cache — safe to clear"),
+        ("**/.venv", "Developer", "yellow", "Python virtual environments — safe but requires recreate"),
+        ("~/.cache/pip", "Package Manager", "green", "pip download cache — safe to clear"),
+        ("~/Library/Application Support/Code/CachedData", "Developer", "green", "VS Code cache — safe to clear"),
+    ]
 
     init(repository: FileRepository) {
         self.repository = repository
     }
 
-    func seedDefaultPatterns() async throws {
+    static func ensureDefaultPatterns(repository: FileRepository) async throws {
         let existing = try await repository.cachePatternCount()
         guard existing == 0 else { return }
+        try await repository.insertCachePatterns(defaultPatterns)
+    }
 
-        let defaults: [(String, String, String, String)] = [
-            ("~/Library/Caches/*", "System", "green", "System and app caches — safe to clear, will regenerate"),
-            ("~/Library/Developer/Xcode/DerivedData", "Developer", "yellow", "Xcode build artifacts — safe but requires rebuild"),
-            ("**/node_modules", "Developer", "yellow", "npm/yarn packages — safe but requires reinstall"),
-            ("~/.gradle/caches", "Developer", "yellow", "Gradle build cache — safe but requires rebuild"),
-            ("~/.cargo/registry/cache", "Developer", "yellow", "Rust crate cache — safe but requires re-download"),
-            ("~/.m2/repository", "Developer", "yellow", "Maven repository — safe but requires re-download"),
-            ("~/Library/Caches/Homebrew", "Package Manager", "green", "Homebrew download cache — safe to clear"),
-            ("**/.venv", "Developer", "yellow", "Python virtual environments — safe but requires recreate"),
-            ("~/.cache/pip", "Package Manager", "green", "pip download cache — safe to clear"),
-            ("~/Library/Application Support/Code/CachedData", "Developer", "green", "VS Code cache — safe to clear"),
-        ]
-
-        try await repository.insertCachePatterns(defaults)
+    func seedDefaultPatterns() async throws {
+        try await Self.ensureDefaultPatterns(repository: repository)
     }
 
     func detectCaches() async throws -> [DetectedCache] {
@@ -75,12 +78,13 @@ actor CacheDetector {
 
         for pattern in patterns {
             let expandedPattern = expandPattern(pattern.pattern)
-            let (paths, size) = try await findMatchingPaths(expandedPattern)
+            let (previewPaths, count, size) = try await findMatchingSummary(expandedPattern)
 
-            if !paths.isEmpty {
+            if count > 0 {
                 results.append(DetectedCache(
                     pattern: pattern,
-                    matchedPaths: paths,
+                    previewPaths: previewPaths,
+                    matchCount: count,
                     totalSize: size
                 ))
             }
@@ -89,16 +93,29 @@ actor CacheDetector {
         return results.sorted { $0.totalSize > $1.totalSize }
     }
 
+    func allMatchingPaths(for pattern: CachePattern) async throws -> [String] {
+        let expandedPattern = expandPattern(pattern.pattern)
+        return try await findAllMatchingPaths(expandedPattern)
+    }
+
     private func expandPattern(_ pattern: String) -> String {
         pattern.replacingOccurrences(of: "~", with: NSHomeDirectory())
     }
 
-    private func findMatchingPaths(_ pattern: String) async throws -> ([String], Int64) {
+    private func findMatchingSummary(_ pattern: String) async throws -> ([String], Int, Int64) {
         // For glob patterns, search the DB for matching paths
         let searchPattern = pattern
             .replacingOccurrences(of: "**", with: "%")
             .replacingOccurrences(of: "*", with: "%")
 
-        return try await repository.matchingPaths(likePattern: searchPattern)
+        return try await repository.matchingPathSummary(likePattern: searchPattern, previewLimit: 20)
+    }
+
+    private func findAllMatchingPaths(_ pattern: String) async throws -> [String] {
+        let searchPattern = pattern
+            .replacingOccurrences(of: "**", with: "%")
+            .replacingOccurrences(of: "*", with: "%")
+
+        return try await repository.allMatchingPaths(likePattern: searchPattern)
     }
 }

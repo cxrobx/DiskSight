@@ -44,7 +44,8 @@ struct VisualizationContainer: View {
                         onSelect: { node in
                             navigateToPath(node.fileNode.path)
                         },
-                        repository: appState.fileRepository
+                        repository: appState.fileRepository,
+                        pathFilter: { appState.shouldIncludePath($0) }
                     )
                 } else if case .completed = appState.scanState {
                     VStack {
@@ -112,6 +113,13 @@ struct VisualizationContainer: View {
         .onChange(of: appState.dataVersion) { _, _ in
             // FSEvents batch processed — rebuild tree with fresh sizes from DB
             Task {
+                await initTreeRoot()
+                await syncTreeToCurrentPath()
+            }
+        }
+        .onChange(of: appState.hideExternalDrives) { _, _ in
+            Task {
+                await appState.refreshVisualizationData()
                 await initTreeRoot()
                 await syncTreeToCurrentPath()
             }
@@ -241,7 +249,10 @@ struct VisualizationContainer: View {
         do {
             if let root = try appState.fileRepository.rootNodeConcurrent() {
                 let node = FolderTreeNode(fileNode: root, depth: 0)
-                await node.loadChildren(using: appState.fileRepository)
+                await node.loadChildren(
+                    using: appState.fileRepository,
+                    pathFilter: { appState.shouldIncludePath($0) }
+                )
                 node.isExpanded = true
                 rootTreeNode = node
             }
@@ -252,7 +263,11 @@ struct VisualizationContainer: View {
 
     private func syncTreeToCurrentPath() async {
         guard let rootTreeNode, let currentPath = appState.vizCurrentPath else { return }
-        await rootTreeNode.expandTo(targetPath: currentPath, using: appState.fileRepository)
+        await rootTreeNode.expandTo(
+            targetPath: currentPath,
+            using: appState.fileRepository,
+            pathFilter: { appState.shouldIncludePath($0) }
+        )
     }
 }
 

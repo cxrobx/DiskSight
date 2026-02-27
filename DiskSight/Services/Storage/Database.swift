@@ -13,11 +13,15 @@ final class Database: Sendable {
         let dbPath = dbDir.appendingPathComponent("disksight.sqlite").path
 
         var config = Configuration()
-        #if DEBUG
         config.prepareDatabase { db in
+            // Limit WAL file growth — checkpoint every 1000 pages (~4MB)
+            try db.execute(sql: "PRAGMA wal_autocheckpoint = 1000")
+            // Cap page cache to 4MB to bound memory usage
+            try db.execute(sql: "PRAGMA cache_size = -4000")
+            #if DEBUG
             db.trace { print("SQL: \($0)") }
+            #endif
         }
-        #endif
 
         dbPool = try! DatabasePool(path: dbPath, configuration: config)
         try! migrator.migrate(dbPool)
@@ -94,6 +98,51 @@ final class Database: Sendable {
                 on: "files",
                 columns: ["scan_session_id", "is_directory"]
             )
+        }
+
+        migrator.registerMigration("v4_created_at_index") { db in
+            try db.create(index: "idx_files_created_at", on: "files", columns: ["created_at"])
+        }
+
+        migrator.registerMigration("v5_parent_covering_index") { db in
+            try db.create(
+                index: "idx_files_parent_covering",
+                on: "files",
+                columns: ["parent_path", "is_directory", "path", "modified_at"]
+            )
+        }
+
+        migrator.registerMigration("v6_session_stats") { db in
+            try db.alter(table: "scan_sessions") { t in
+                t.add(column: "indexed_size", .integer)
+            }
+            // Covering index for session-scoped fileCount/totalSize fallback queries
+            try db.create(
+                index: "idx_files_session_size",
+                on: "files",
+                columns: ["scan_session_id", "is_directory", "size"]
+            )
+        }
+
+        migrator.registerMigration("v7_growth_cache") { db in
+            try db.create(table: "growth_cache") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("scan_session_id", .integer).notNull().references("scan_sessions")
+                t.column("period", .text).notNull()
+                t.column("payload", .text).notNull()
+                t.column("generated_at", .double).notNull()
+            }
+
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_growth_cache_session_period
+                ON growth_cache(scan_session_id, period)
+                """)
+        }
+
+        migrator.registerMigration("v8_growth_cache_version") { db in
+            try db.alter(table: "growth_cache") { t in
+                t.add(column: "cache_version", .integer).notNull().defaults(to: 1)
+            }
         }
 
         return migrator

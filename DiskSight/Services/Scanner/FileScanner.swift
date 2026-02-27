@@ -8,131 +8,410 @@ struct FileScanner {
         self.repository = repository
     }
 
-    func incrementalScan(rootURL: URL, sessionId: Int64) -> AsyncStream<ScanProgress> {
+    private func shouldExcludeExternalVolume(
+        url: URL,
+        isDirectory: Bool,
+        rootURL: URL,
+        values: URLResourceValues
+    ) -> Bool {
+        guard rootURL.path == "/" else { return false }
+        guard isDirectory else { return false }
+        guard url.path.hasPrefix("/Volumes/") else { return false }
+        return values.volumeIsInternal == false
+    }
+
+    func quickSync(rootURL: URL, since: Double, sessionId: Int64) -> AsyncStream<ScanProgress> {
         AsyncStream { continuation in
-            Task {
+            let producerTask = Task {
                 do {
                     var progress = ScanProgress()
-                    var batch: [FileNode] = []
-                    var upsertCount = 0
-
-                    // Build lookup of existing paths → modifiedAt (cursor-based, no full FileNode load)
-                    let existingFiles = try repository.existingFileModifiedTimes()
-                    var seenPaths = Set<String>()
+                    var upsertBatch: [FileNode] = []
+                    var deleteBatch: [String] = []
+                    var affectedPaths = Set<String>()
+                    var dirCount = 0
 
                     let resourceKeys: Set<URLResourceKey> = [
                         .fileSizeKey,
                         .isDirectoryKey,
+                        .isRegularFileKey,
+                        .volumeIsInternalKey,
                         .contentModificationDateKey,
                         .contentAccessDateKey,
                         .creationDateKey,
-                        .typeIdentifierKey
+                        .typeIdentifierKey,
+                        .isSymbolicLinkKey
                     ]
 
-                    guard let enumerator = FileManager.default.enumerator(
-                        at: rootURL,
-                        includingPropertiesForKeys: Array(resourceKeys),
-                        options: []
-                    ) else {
-                        continuation.finish()
-                        return
-                    }
+                    // Stack entries: (url, isNewToDb)
+                    // isNewToDb=true forces "changed" processing regardless of mtime
+                    var stack: [(url: URL, isNewToDb: Bool)] = [(rootURL, false)]
 
-                    // Track root
-                    seenPaths.insert(rootURL.path)
-
-                    for case let fileURL as URL in enumerator {
+                    while let entry = stack.popLast() {
                         if Task.isCancelled { break }
 
-                        let path = fileURL.path
-                        seenPaths.insert(path)
-                        progress.filesScanned += 1
-
-                        guard let values = try? fileURL.resourceValues(forKeys: resourceKeys) else {
-                            continue
+                        // Yield to cooperative thread pool every 200 directories
+                        // to prevent starving other tasks (especially UI)
+                        dirCount += 1
+                        if dirCount % 200 == 0 {
+                            await Task.yield()
                         }
 
-                        let isDir = values.isDirectory ?? false
+                        let dirURL = entry.url
+                        let dirPath = dirURL.path
+                        let isNewToDb = entry.isNewToDb
 
-                        if isDir {
-                            // Only upsert new directories; existing ones get sizes recalculated
-                            if existingFiles[path] != nil {
-                                if progress.filesScanned % 5000 == 0 {
-                                    progress.currentPath = fileURL.lastPathComponent
-                                    continuation.yield(progress)
+                        // Get directory mtime
+                        let dirValues = try? dirURL.resourceValues(forKeys: [.contentModificationDateKey, .isSymbolicLinkKey])
+
+                        // Skip symbolic links
+                        if dirValues?.isSymbolicLink == true { continue }
+
+                        let dirMtime = dirValues?.contentModificationDate?.timeIntervalSince1970 ?? 0
+                        let isChanged = isNewToDb || dirMtime > since || dirPath == rootURL.path
+
+                        if isChanged {
+                            // CHANGED DIRECTORY: diff filesystem vs DB
+                            guard let contents = try? FileManager.default.contentsOfDirectory(
+                                at: dirURL,
+                                includingPropertiesForKeys: Array(resourceKeys),
+                                options: []
+                            ) else { continue }
+
+                            let dbChildren = try repository.existingChildrenModifiedTimes(parentPath: dirPath)
+                            var fsChildPaths = Set<String>()
+
+                            for fileURL in contents {
+                                let path = fileURL.path
+                                fsChildPaths.insert(path)
+
+                                guard let values = try? fileURL.resourceValues(forKeys: resourceKeys) else { continue }
+
+                                // Skip symbolic links
+                                if values.isSymbolicLink == true {
+                                    fsChildPaths.remove(path)
+                                    continue
                                 }
-                                continue
+
+                                let isDir = values.isDirectory ?? false
+                                let modifiedAt = values.contentModificationDate?.timeIntervalSince1970
+
+                                if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                                    fsChildPaths.remove(path)
+                                    continue
+                                }
+
+                                // Skip sockets/devices/other non-regular entries.
+                                if !isDir && values.isRegularFile != true {
+                                    fsChildPaths.remove(path)
+                                    continue
+                                }
+
+                                if isDir {
+                                    // Push child directory onto stack
+                                    let existsInDb = dbChildren[path] != nil
+                                    stack.append((fileURL, !existsInDb))
+
+                                    // Upsert if new to DB
+                                    if !existsInDb {
+                                        let node = FileNode(
+                                            path: path,
+                                            name: fileURL.lastPathComponent,
+                                            parentPath: dirPath,
+                                            size: 0,
+                                            isDirectory: true,
+                                            modifiedAt: modifiedAt,
+                                            accessedAt: values.contentAccessDate?.timeIntervalSince1970,
+                                            createdAt: values.creationDate?.timeIntervalSince1970,
+                                            fileType: values.typeIdentifier,
+                                            scanSessionId: sessionId
+                                        )
+                                        upsertBatch.append(node)
+                                        affectedPaths.insert(path)
+                                    }
+                                } else {
+                                    // File: upsert if new or modified
+                                    if let existingModified = dbChildren[path],
+                                       existingModified == modifiedAt {
+                                        continue // unchanged
+                                    }
+
+                                    let size = Int64(values.fileSize ?? 0)
+                                    let node = FileNode(
+                                        path: path,
+                                        name: fileURL.lastPathComponent,
+                                        parentPath: dirPath,
+                                        size: size,
+                                        isDirectory: false,
+                                        modifiedAt: modifiedAt,
+                                        accessedAt: values.contentAccessDate?.timeIntervalSince1970,
+                                        createdAt: values.creationDate?.timeIntervalSince1970,
+                                        fileType: values.typeIdentifier,
+                                        scanSessionId: sessionId
+                                    )
+                                    upsertBatch.append(node)
+                                    affectedPaths.insert(path)
+                                    progress.totalSize += size
+                                }
+
+                                progress.filesScanned += 1
                             }
+
+                            // Find deleted paths (in DB but not on filesystem)
+                            for dbPath in dbChildren.keys {
+                                if !fsChildPaths.contains(dbPath) {
+                                    deleteBatch.append(dbPath)
+                                    affectedPaths.insert(dbPath)
+                                }
+                            }
+
+                            progress.currentPath = dirURL.lastPathComponent
                         } else {
-                            // Skip unchanged files (same modifiedAt)
-                            let modifiedAt = values.contentModificationDate?.timeIntervalSince1970
-                            if let existingModified = existingFiles[path],
-                               existingModified == modifiedAt {
-                                if progress.filesScanned % 5000 == 0 {
-                                    progress.currentPath = fileURL.lastPathComponent
-                                    continuation.yield(progress)
-                                }
-                                continue
+                            // UNCHANGED DIRECTORY: recurse via DB-known subdirectories only
+                            let subdirs = try repository.existingSubdirectoryPaths(parentPath: dirPath)
+                            for subdirPath in subdirs {
+                                stack.append((URL(fileURLWithPath: subdirPath), false))
                             }
                         }
 
-                        let size = Int64(values.fileSize ?? 0)
-                        let node = FileNode(
-                            path: path,
-                            name: fileURL.lastPathComponent,
-                            parentPath: fileURL.deletingLastPathComponent().path,
-                            size: isDir ? 0 : size,
-                            isDirectory: isDir,
-                            modifiedAt: values.contentModificationDate?.timeIntervalSince1970,
-                            accessedAt: values.contentAccessDate?.timeIntervalSince1970,
-                            createdAt: values.creationDate?.timeIntervalSince1970,
-                            fileType: values.typeIdentifier,
-                            scanSessionId: sessionId
-                        )
-
-                        batch.append(node)
-                        upsertCount += 1
-                        if !isDir {
-                            progress.totalSize += size
-                        }
-                        progress.currentPath = fileURL.lastPathComponent
-
-                        if batch.count >= batchSize {
-                            try await repository.insertFilesBatch(batch)
-                            batch.removeAll(keepingCapacity: true)
+                        // Flush upsert batch
+                        if upsertBatch.count >= batchSize {
+                            try await repository.insertFilesBatch(upsertBatch)
+                            upsertBatch.removeAll(keepingCapacity: true)
                             continuation.yield(progress)
                         }
+
+                        // Flush delete batch
+                        if deleteBatch.count >= 500 {
+                            try await repository.deleteFilesRecursive(paths: deleteBatch)
+                            deleteBatch.removeAll(keepingCapacity: true)
+                        }
                     }
 
-                    // Flush remaining upserts
-                    if !batch.isEmpty {
-                        try await repository.insertFilesBatch(batch)
+                    // Flush remaining
+                    if !upsertBatch.isEmpty {
+                        try await repository.insertFilesBatch(upsertBatch)
+                    }
+                    if !deleteBatch.isEmpty {
+                        try await repository.deleteFilesRecursive(paths: deleteBatch)
                     }
 
-                    // Delete files that no longer exist on disk
-                    let removedPaths = Set(existingFiles.keys).subtracting(seenPaths)
-                    if !removedPaths.isEmpty {
-                        try await repository.deleteFiles(paths: Array(removedPaths))
+                    // Recalculate ancestor sizes for all affected paths
+                    if !affectedPaths.isEmpty {
+                        try await repository.updateAncestorSizes(forPaths: affectedPaths)
+                        // Update root node size (updateAncestorSizes stops at "/" due to guard)
+                        if let root = try repository.rootNodeConcurrent() {
+                            let children = try repository.childrenWithSizesConcurrent(ofPath: root.path)
+                            let totalSize = children.reduce(Int64(0)) { $0 + $1.size }
+                            var updatedRoot = root
+                            updatedRoot.size = totalSize
+                            try await repository.insertFilesBatch([updatedRoot])
+                        }
                     }
 
-                    // Recalculate directory sizes if anything changed
-                    if upsertCount > 0 || !removedPaths.isEmpty {
-                        try await repository.calculateDirectorySizes()
+                    progress.completed = true
+                    continuation.yield(progress)
+                    continuation.finish()
+                } catch {
+                    print("FileScanner quickSync error: \(error)")
+                    continuation.yield(ScanProgress())
+                    continuation.finish()
+                }
+            }
+            // Cancel the producer if the consumer side terminates
+            // (e.g. incrementalSyncTask?.cancel() in AppState)
+            continuation.onTermination = { @Sendable _ in producerTask.cancel() }
+        }
+    }
+
+    func incrementalScan(rootURL: URL, sessionId: Int64) -> AsyncStream<ScanProgress> {
+        AsyncStream { continuation in
+            let producerTask = Task {
+                do {
+                    var progress = ScanProgress()
+                    var upsertBatch: [FileNode] = []
+                    var deleteBatch: [String] = []
+                    var affectedPaths = Set<String>()
+                    var dirCount = 0
+
+                    let resourceKeys: Set<URLResourceKey> = [
+                        .fileSizeKey,
+                        .isDirectoryKey,
+                        .isRegularFileKey,
+                        .volumeIsInternalKey,
+                        .contentModificationDateKey,
+                        .contentAccessDateKey,
+                        .creationDateKey,
+                        .typeIdentifierKey,
+                        .isSymbolicLinkKey
+                    ]
+
+                    // Iterative DFS — every directory is treated as "changed"
+                    var stack: [URL] = [rootURL]
+
+                    while let dirURL = stack.popLast() {
+                        if Task.isCancelled { break }
+
+                        // Yield to cooperative thread pool every 200 directories
+                        dirCount += 1
+                        if dirCount % 200 == 0 {
+                            await Task.yield()
+                        }
+
+                        let dirPath = dirURL.path
+
+                        // Skip symbolic links
+                        let dirValues = try? dirURL.resourceValues(forKeys: [.isSymbolicLinkKey])
+                        if dirValues?.isSymbolicLink == true { continue }
+
+                        guard let contents = try? FileManager.default.contentsOfDirectory(
+                            at: dirURL,
+                            includingPropertiesForKeys: Array(resourceKeys),
+                            options: []
+                        ) else { continue }
+
+                        let dbChildren = try repository.existingChildrenModifiedTimes(parentPath: dirPath)
+                        var fsChildPaths = Set<String>()
+
+                        for fileURL in contents {
+                            let path = fileURL.path
+                            fsChildPaths.insert(path)
+
+                            guard let values = try? fileURL.resourceValues(forKeys: resourceKeys) else { continue }
+
+                            // Skip symbolic links
+                            if values.isSymbolicLink == true {
+                                fsChildPaths.remove(path)
+                                continue
+                            }
+
+                            let isDir = values.isDirectory ?? false
+                            let modifiedAt = values.contentModificationDate?.timeIntervalSince1970
+
+                            if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                                fsChildPaths.remove(path)
+                                continue
+                            }
+
+                            // Skip sockets/devices/other non-regular entries.
+                            if !isDir && values.isRegularFile != true {
+                                fsChildPaths.remove(path)
+                                continue
+                            }
+
+                            if isDir {
+                                stack.append(fileURL)
+
+                                // Upsert directory if new
+                                if dbChildren[path] == nil {
+                                    let node = FileNode(
+                                        path: path,
+                                        name: fileURL.lastPathComponent,
+                                        parentPath: dirPath,
+                                        size: 0,
+                                        isDirectory: true,
+                                        modifiedAt: modifiedAt,
+                                        accessedAt: values.contentAccessDate?.timeIntervalSince1970,
+                                        createdAt: values.creationDate?.timeIntervalSince1970,
+                                        fileType: values.typeIdentifier,
+                                        scanSessionId: sessionId
+                                    )
+                                    upsertBatch.append(node)
+                                    affectedPaths.insert(path)
+                                }
+                            } else {
+                                // Skip unchanged files
+                                if let existingModified = dbChildren[path],
+                                   existingModified == modifiedAt {
+                                    progress.filesScanned += 1
+                                    if progress.filesScanned % 5000 == 0 {
+                                        progress.currentPath = fileURL.lastPathComponent
+                                        continuation.yield(progress)
+                                    }
+                                    continue
+                                }
+
+                                let size = Int64(values.fileSize ?? 0)
+                                let node = FileNode(
+                                    path: path,
+                                    name: fileURL.lastPathComponent,
+                                    parentPath: dirPath,
+                                    size: size,
+                                    isDirectory: false,
+                                    modifiedAt: modifiedAt,
+                                    accessedAt: values.contentAccessDate?.timeIntervalSince1970,
+                                    createdAt: values.creationDate?.timeIntervalSince1970,
+                                    fileType: values.typeIdentifier,
+                                    scanSessionId: sessionId
+                                )
+                                upsertBatch.append(node)
+                                affectedPaths.insert(path)
+                                progress.totalSize += size
+                            }
+
+                            progress.filesScanned += 1
+                        }
+
+                        // Deleted paths: in DB but not on filesystem
+                        for dbPath in dbChildren.keys {
+                            if !fsChildPaths.contains(dbPath) {
+                                deleteBatch.append(dbPath)
+                                affectedPaths.insert(dbPath)
+                            }
+                        }
+
+                        progress.currentPath = dirURL.lastPathComponent
+
+                        // Flush upsert batch
+                        if upsertBatch.count >= batchSize {
+                            try await repository.insertFilesBatch(upsertBatch)
+                            upsertBatch.removeAll(keepingCapacity: true)
+                            continuation.yield(progress)
+                        }
+
+                        // Flush delete batch
+                        if deleteBatch.count >= 500 {
+                            try await repository.deleteFilesRecursive(paths: deleteBatch)
+                            deleteBatch.removeAll(keepingCapacity: true)
+                        }
                     }
 
+                    // Flush remaining
+                    if !upsertBatch.isEmpty {
+                        try await repository.insertFilesBatch(upsertBatch)
+                    }
+                    if !deleteBatch.isEmpty {
+                        try await repository.deleteFilesRecursive(paths: deleteBatch)
+                    }
+
+                    // Recalculate ancestor sizes
+                    if !affectedPaths.isEmpty {
+                        try await repository.updateAncestorSizes(forPaths: affectedPaths)
+                        // Update root node size
+                        if let root = try repository.rootNodeConcurrent() {
+                            let children = try repository.childrenWithSizesConcurrent(ofPath: root.path)
+                            let totalSize = children.reduce(Int64(0)) { $0 + $1.size }
+                            var updatedRoot = root
+                            updatedRoot.size = totalSize
+                            try await repository.insertFilesBatch([updatedRoot])
+                        }
+                    }
+
+                    progress.completed = true
                     continuation.yield(progress)
                     continuation.finish()
                 } catch {
                     print("FileScanner incremental error: \(error)")
+                    continuation.yield(ScanProgress())
                     continuation.finish()
                 }
             }
+            continuation.onTermination = { @Sendable _ in producerTask.cancel() }
         }
     }
 
     func scan(rootURL: URL, sessionId: Int64) -> AsyncStream<ScanProgress> {
         AsyncStream { continuation in
-            Task {
+            let producerTask = Task {
                 do {
                     var progress = ScanProgress()
                     var batch: [FileNode] = []
@@ -140,10 +419,13 @@ struct FileScanner {
                     let resourceKeys: Set<URLResourceKey> = [
                         .fileSizeKey,
                         .isDirectoryKey,
+                        .isRegularFileKey,
+                        .volumeIsInternalKey,
                         .contentModificationDateKey,
                         .contentAccessDateKey,
                         .creationDateKey,
-                        .typeIdentifierKey
+                        .typeIdentifierKey,
+                        .isSymbolicLinkKey
                     ]
 
                     guard let enumerator = FileManager.default.enumerator(
@@ -172,7 +454,24 @@ struct FileScanner {
                         guard let values = try? fileURL.resourceValues(forKeys: resourceKeys) else {
                             continue // Skip files we can't read
                         }
+
+                        // Keep symlink policy consistent with incremental modes.
+                        if values.isSymbolicLink == true {
+                            if values.isDirectory == true {
+                                enumerator.skipDescendants()
+                            }
+                            continue
+                        }
                         let isDir = values.isDirectory ?? false
+                        if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                            if isDir {
+                                enumerator.skipDescendants()
+                            }
+                            continue
+                        }
+                        if !isDir && values.isRegularFile != true {
+                            continue
+                        }
                         let size = Int64(values.fileSize ?? 0)
 
                         let node = FileNode(
@@ -217,6 +516,7 @@ struct FileScanner {
                     continuation.finish()
                 }
             }
+            continuation.onTermination = { @Sendable _ in producerTask.cancel() }
         }
     }
 }

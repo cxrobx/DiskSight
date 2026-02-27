@@ -89,35 +89,28 @@ actor SmartCleanupService {
         }
     }
 
-    // MARK: - Cross-Analysis Signal Loading
+    // MARK: - Cross-Analysis Signal Loading (SQL-only, memory-efficient)
 
     private func loadDuplicatePaths(repository: FileRepository) async throws -> Set<String> {
-        let groups = try await repository.duplicateGroups()
-        var paths = Set<String>()
-        for group in groups {
-            for file in group.files {
-                paths.insert(file.path)
-            }
-        }
-        return paths
+        try await repository.duplicateFilePaths()
     }
 
     private func loadStalePaths(repository: FileRepository) async throws -> Set<String> {
         let sixMonthsAgo = Date().timeIntervalSince1970 - (180 * 24 * 60 * 60)
-        let files = try await repository.staleFiles(accessedBefore: sixMonthsAgo, minSize: 1_048_576)
-        return Set(files.map(\.path))
+        return try await repository.staleFilePaths(accessedBefore: sixMonthsAgo, minSize: 1_048_576)
     }
 
     private func loadCachePaths(repository: FileRepository) async throws -> Set<String> {
-        let detector = CacheDetector(repository: repository)
-        let caches = try await detector.detectCaches()
-        var paths = Set<String>()
-        for cache in caches {
-            for path in cache.matchedPaths {
-                paths.insert(path)
-            }
+        try await CacheDetector.ensureDefaultPatterns(repository: repository)
+        // Load cache patterns and expand them to SQL LIKE patterns
+        let patterns = try await repository.allCachePatterns()
+        let expandedPatterns = patterns.map { pattern in
+            pattern.pattern
+                .replacingOccurrences(of: "~", with: NSHomeDirectory())
+                .replacingOccurrences(of: "**", with: "%")
+                .replacingOccurrences(of: "*", with: "%")
         }
-        return paths
+        return try await repository.cacheMatchingPaths(patterns: expandedPatterns)
     }
 
     // MARK: - Signal Merging

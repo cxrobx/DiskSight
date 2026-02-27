@@ -8,6 +8,7 @@ struct ScanSession: Codable, FetchableRecord, PersistableRecord, Identifiable {
     var completedAt: Double?
     var fileCount: Int?
     var totalSize: Int64?
+    var indexedSize: Int64?
     var lastFseventsId: Int64?
 
     static let databaseTableName = "scan_sessions"
@@ -19,6 +20,7 @@ struct ScanSession: Codable, FetchableRecord, PersistableRecord, Identifiable {
         case completedAt = "completed_at"
         case fileCount = "file_count"
         case totalSize = "total_size"
+        case indexedSize = "indexed_size"
         case lastFseventsId = "last_fsevents_id"
     }
 

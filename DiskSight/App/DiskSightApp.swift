@@ -1,4 +1,5 @@
 import SwiftUI
+import Sparkle
 
 @main
 struct DiskSightApp: App {
@@ -8,6 +9,8 @@ struct DiskSightApp: App {
     @State private var showSearch = false
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
+
+    private let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     private var selectedColorScheme: ColorScheme? {
         (AppearanceMode(rawValue: appearanceMode) ?? .system).colorScheme
@@ -50,6 +53,10 @@ struct DiskSightApp: App {
         .windowStyle(.titleBar)
         .defaultSize(width: 1200, height: 800)
         .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesView(updater: updaterController.updater)
+            }
+
             CommandGroup(after: .sidebar) {
                 Button("Overview") {
                     appState.selectedSection = .overview
@@ -80,6 +87,11 @@ struct DiskSightApp: App {
                     appState.selectedSection = .smartCleanup
                 }
                 .keyboardShortcut("6", modifiers: .command)
+
+                Button("Recent Growth") {
+                    appState.selectedSection = .growth
+                }
+                .keyboardShortcut("7", modifiers: .command)
             }
 
             CommandGroup(after: .saveItem) {
@@ -87,7 +99,7 @@ struct DiskSightApp: App {
                     appState.exportCSV()
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
-                .disabled(appState.lastScanSession == nil)
+                .disabled(appState.lastScanSession == nil || appState.isExportingCSV)
             }
 
             CommandGroup(replacing: .textEditing) {
@@ -99,8 +111,38 @@ struct DiskSightApp: App {
         }
 
         Settings {
-            SettingsView()
+            SettingsView(updater: updaterController.updater)
+                .environmentObject(appState)
         }
+    }
+}
+
+struct CheckForUpdatesView: View {
+    @ObservedObject private var checkForUpdatesViewModel: CheckForUpdatesViewModel
+
+    init(updater: SPUUpdater) {
+        self.checkForUpdatesViewModel = CheckForUpdatesViewModel(updater: updater)
+    }
+
+    var body: some View {
+        Button("Check for Updates...", action: checkForUpdatesViewModel.checkForUpdates)
+            .disabled(!checkForUpdatesViewModel.canCheckForUpdates)
+    }
+}
+
+final class CheckForUpdatesViewModel: ObservableObject {
+    @Published var canCheckForUpdates = false
+
+    private let updater: SPUUpdater
+
+    init(updater: SPUUpdater) {
+        self.updater = updater
+        updater.publisher(for: \.canCheckForUpdates)
+            .assign(to: &$canCheckForUpdates)
+    }
+
+    func checkForUpdates() {
+        updater.checkForUpdates()
     }
 }
 
@@ -116,6 +158,8 @@ struct ContentView: View {
                 OverviewView()
             case .visualization:
                 VisualizationContainer()
+            case .growth:
+                GrowthView()
             case .duplicates:
                 DuplicatesView()
             case .staleFiles:

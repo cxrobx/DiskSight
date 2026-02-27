@@ -5,6 +5,7 @@ struct FolderTreeSidebar: View {
     var selectedPath: String?
     var onSelect: (FolderTreeNode) -> Void
     let repository: FileRepository
+    let pathFilter: (String) -> Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -27,7 +28,8 @@ struct FolderTreeSidebar: View {
                         node: rootNode,
                         selectedPath: selectedPath,
                         onSelect: onSelect,
-                        repository: repository
+                        repository: repository,
+                        pathFilter: pathFilter
                     )
                 }
                 .listStyle(.sidebar)
@@ -49,6 +51,7 @@ struct FolderTreeRow: View {
     var selectedPath: String?
     var onSelect: (FolderTreeNode) -> Void
     let repository: FileRepository
+    let pathFilter: (String) -> Bool
 
     var body: some View {
         DisclosureGroup(
@@ -66,7 +69,8 @@ struct FolderTreeRow: View {
                             node: child,
                             selectedPath: selectedPath,
                             onSelect: onSelect,
-                            repository: repository
+                            repository: repository,
+                            pathFilter: pathFilter
                         )
                     }
                 }
@@ -92,7 +96,7 @@ struct FolderTreeRow: View {
         .onChange(of: node.isExpanded) { expanded in
             if expanded {
                 Task {
-                    await node.loadChildren(using: repository)
+                    await node.loadChildren(using: repository, pathFilter: pathFilter)
                 }
             }
         }

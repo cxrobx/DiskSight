@@ -1,4 +1,5 @@
 import SwiftUI
+import Sparkle
 
 enum AppearanceMode: String, CaseIterable, Identifiable {
     case system = "System"
@@ -17,6 +18,9 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @EnvironmentObject var appState: AppState
+    let updater: SPUUpdater
+
     @AppStorage("visualizationMode") private var defaultVizMode: VisualizationMode = .treemap
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
     @AppStorage("monitoringEnabled") private var monitoringEnabled = true
@@ -43,6 +47,7 @@ struct SettingsView: View {
                         Text(mode.rawValue).tag(mode)
                     }
                 }
+                Toggle("Hide external drives", isOn: $appState.hideExternalDrives)
             }
 
             Section("Monitoring") {
@@ -96,8 +101,23 @@ struct SettingsView: View {
             }
 
             Section("About") {
-                LabeledContent("Version", value: "1.0.0")
-                LabeledContent("Build", value: "1")
+                LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")
+                LabeledContent("Build", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")
+            }
+
+            Section("Updates") {
+                HStack {
+                    Button("Check for Updates...") {
+                        updater.checkForUpdates()
+                    }
+
+                    Spacer()
+
+                    Toggle("Automatically check for updates", isOn: Binding(
+                        get: { updater.automaticallyChecksForUpdates },
+                        set: { updater.automaticallyChecksForUpdates = $0 }
+                    ))
+                }
             }
         }
         .formStyle(.grouped)
