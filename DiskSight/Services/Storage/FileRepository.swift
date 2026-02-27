@@ -783,6 +783,26 @@ actor FileRepository {
         }
     }
 
+    /// Nonisolated DB cache read — bypasses actor for fast synchronous access in switchGrowthPeriod().
+    nonisolated func cachedGrowthFoldersConcurrent(sessionId: Int64, period: GrowthPeriod) -> [FolderGrowth]? {
+        try? database.dbPool.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT payload
+                    FROM growth_cache
+                    WHERE scan_session_id = ? AND period = ? AND cache_version = ?
+                    LIMIT 1
+                    """,
+                arguments: [sessionId, period.rawValue, growthCacheVersion]
+            ) else { return nil }
+
+            let payload: String = row["payload"]
+            guard let data = payload.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode([FolderGrowth].self, from: data)
+        }
+    }
+
     func upsertGrowthCache(sessionId: Int64, period: GrowthPeriod, folders: [FolderGrowth]) throws {
         let payloadData = try JSONEncoder().encode(folders)
         guard let payload = String(data: payloadData, encoding: .utf8) else { return }

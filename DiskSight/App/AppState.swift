@@ -595,18 +595,29 @@ final class AppState: ObservableObject {
         detectedCaches = (try? await detector.detectCaches()) ?? []
     }
 
-    /// Synchronous period switch — instant for cache hits, spawns async load for misses.
+    /// Synchronous period switch — instant for in-memory or DB cache hits, async SQL as last resort.
     func switchGrowthPeriod(to period: GrowthPeriod) {
-        ensureGrowthCacheFreshForCurrentDataVersion()
         growthPeriod = period
+
+        // 1. In-memory cache hit → instant
         if let cached = growthCache[period] {
             growthFolders = visibleGrowthFolders(cached)
             growthLoadingPeriod = nil
             return
         }
+
+        // 2. DB cache hit (nonisolated, bypasses actor) → instant
+        if let sessionId = lastScanSession?.id,
+           let persisted = fileRepository.cachedGrowthFoldersConcurrent(sessionId: sessionId, period: period) {
+            growthCache[period] = persisted
+            growthFolders = visibleGrowthFolders(persisted)
+            growthLoadingPeriod = nil
+            return
+        }
+
+        // 3. Full cache miss — show loading, run SQL in background
         growthLoadingPeriod = period
         growthFolders = nil
-        // Cache miss — load in background
         Task {
             let results = await loadGrowthPeriod(period, forceRefresh: false)
             if growthPeriod == period {
@@ -618,11 +629,26 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Initial load — async, for .task on first appearance.
+    /// Initial load — for .task on first appearance. Tries caches before expensive SQL.
     func loadGrowthData() async {
-        ensureGrowthCacheFreshForCurrentDataVersion()
         guard growthFolders == nil else { return }
         let period = growthPeriod
+
+        // Try in-memory cache
+        if let cached = growthCache[period] {
+            growthFolders = visibleGrowthFolders(cached)
+            return
+        }
+
+        // Try DB cache (nonisolated, fast)
+        if let sessionId = lastScanSession?.id,
+           let persisted = fileRepository.cachedGrowthFoldersConcurrent(sessionId: sessionId, period: period) {
+            growthCache[period] = persisted
+            growthFolders = visibleGrowthFolders(persisted)
+            return
+        }
+
+        // Full miss — async SQL
         growthLoadingPeriod = period
         let results = await loadGrowthPeriod(period, forceRefresh: false)
         if growthPeriod == period {

@@ -40,11 +40,9 @@ struct GrowthView: View {
                 }
             }
         }
-        .onChange(of: appState.dataVersion) {
-            Task {
-                await appState.refreshGrowthData()
-            }
-        }
+        // Growth data does NOT refresh on every FSEvents batch (dataVersion).
+        // The SQL aggregation is expensive; refresh only on scan completion
+        // and explicit period switch. Warmup task pre-populates the DB cache.
     }
 
     private var headerBar: some View {
