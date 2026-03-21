@@ -22,6 +22,13 @@ struct DiskSightApp: App {
                 .environmentObject(appState)
                 .frame(minWidth: 1100, minHeight: 600)
                 .preferredColorScheme(selectedColorScheme)
+                .alert(item: $appState.activeAlert) { alert in
+                    Alert(
+                        title: Text(alert.title),
+                        message: Text(alert.message),
+                        dismissButton: .default(Text("OK"))
+                    )
+                }
                 .sheet(isPresented: $showOnboarding) {
                     OnboardingView(isPresented: $showOnboarding) { url in
                         hasCompletedOnboarding = true
@@ -33,6 +40,11 @@ struct DiskSightApp: App {
                     SearchView()
                         .environmentObject(appState)
                         .frame(width: 600, height: 500)
+                }
+                .sheet(isPresented: $appState.showActivityLog) {
+                    ActivityLogView()
+                        .environmentObject(appState)
+                        .frame(minWidth: 720, minHeight: 420)
                 }
                 .onAppear {
                     if !hasCompletedOnboarding && appState.lastScanSession == nil {
@@ -95,11 +107,22 @@ struct DiskSightApp: App {
             }
 
             CommandGroup(after: .saveItem) {
+                Button("Refresh Metrics") {
+                    appState.refreshMetrics()
+                }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(!appState.canRefreshMetrics || appState.isSyncing)
+
                 Button("Export as CSV...") {
                     appState.exportCSV()
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(appState.lastScanSession == nil || appState.isExportingCSV)
+
+                Button("Activity Log...") {
+                    appState.showActivityLog = true
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
             }
 
             CommandGroup(replacing: .textEditing) {
@@ -169,6 +192,90 @@ struct ContentView: View {
             case .smartCleanup:
                 SmartCleanupView()
             }
+        }
+    }
+}
+
+struct ActivityLogView: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Activity Log")
+                        .font(.title2.bold())
+                    Text("Recent warnings, errors, and operational events.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Clear") {
+                    appState.clearActivityLog()
+                }
+                .disabled(appState.activityLog.isEmpty)
+                Button("Done") {
+                    dismiss()
+                }
+            }
+            .padding(20)
+
+            Divider()
+
+            if appState.activityLog.isEmpty {
+                ContentUnavailableView(
+                    "No Activity Yet",
+                    systemImage: "checkmark.circle",
+                    description: Text("DiskSight will list operational warnings and errors here.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(appState.activityLog) { entry in
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: entry.level.icon)
+                            .foregroundStyle(color(for: entry.level))
+                            .frame(width: 18)
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(entry.title)
+                                    .font(.headline)
+                                Text(entry.source)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                if entry.occurrenceCount > 1 {
+                                    Text("x\(entry.occurrenceCount)")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(entry.timestamp, format: .dateTime.hour().minute())
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Text(entry.message)
+                                .font(.subheadline)
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .listStyle(.inset)
+            }
+        }
+    }
+
+    private func color(for level: AppActivityLevel) -> Color {
+        switch level {
+        case .info:
+            return .blue
+        case .warning:
+            return .orange
+        case .error:
+            return .red
         }
     }
 }

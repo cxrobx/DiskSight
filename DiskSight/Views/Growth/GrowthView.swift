@@ -29,9 +29,7 @@ struct GrowthView: View {
             }
         }
         .task {
-            if appState.growthFolders == nil {
-                await appState.loadGrowthData()
-            }
+            await appState.loadGrowthData()
         }
         .onChange(of: appState.scanState) { _, newState in
             if newState == .completed {
@@ -40,9 +38,6 @@ struct GrowthView: View {
                 }
             }
         }
-        // Growth data does NOT refresh on every FSEvents batch (dataVersion).
-        // The SQL aggregation is expensive; refresh only on scan completion
-        // and explicit period switch. Warmup task pre-populates the DB cache.
     }
 
     private var headerBar: some View {
@@ -51,13 +46,21 @@ struct GrowthView: View {
                 Text("Recent Growth")
                     .font(.headline)
                 if !folders.isEmpty {
-                    Text("\(folders.count) folders | \(SizeFormatter.format(totalGrowth)) added")
+                    Text(subtitleText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
             Spacer()
+
+            Button {
+                appState.refreshMetrics()
+            } label: {
+                Label(appState.isSyncing ? "Refreshing..." : "Refresh", systemImage: "arrow.clockwise")
+            }
+            .controlSize(.small)
+            .disabled(!appState.canRefreshMetrics || appState.isSyncing)
 
             Picker(
                 "Created within:",
@@ -172,5 +175,13 @@ struct GrowthView: View {
                     .frame(width: max(2, geo.size.width * proportion))
             }
         }
+    }
+
+    private var subtitleText: String {
+        let summary = "\(folders.count) folders | \(SizeFormatter.format(totalGrowth)) added"
+        if appState.isSyncing {
+            return summary + " | refreshing live"
+        }
+        return summary
     }
 }

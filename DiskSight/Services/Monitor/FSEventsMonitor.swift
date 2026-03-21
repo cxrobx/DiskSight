@@ -1,11 +1,14 @@
 import Foundation
 import Combine
+import OSLog
 
 final class FSEventsMonitor: @unchecked Sendable {
+    private let logger = Logger(subsystem: "com.disksight.app", category: "FSEventsMonitor")
     private var stream: FSEventStreamRef?
     private let repository: FileRepository
+    private let sessionId: Int64?
     private let debounceInterval: TimeInterval
-    private var pendingPaths = Set<String>()
+    private var pendingEventFlags: [String: UInt32] = [:]
     private var debounceTimer: Timer?
     private let queue = DispatchQueue(label: "com.disksight.fsevents", qos: .utility)
     private let lock = NSLock()
@@ -19,9 +22,12 @@ final class FSEventsMonitor: @unchecked Sendable {
     /// Fires once after a debounced batch of events has been fully processed in DB.
     /// Sends the count of paths that were processed.
     let batchProcessedSubject = PassthroughSubject<Int, Never>()
+    /// Operational warnings/errors that should be surfaced in the app-wide activity log.
+    let issueSubject = PassthroughSubject<AppOperationMessage, Never>()
 
-    init(repository: FileRepository, debounceInterval: TimeInterval = 2.0) {
+    init(repository: FileRepository, sessionId: Int64?, debounceInterval: TimeInterval = 1.0) {
         self.repository = repository
+        self.sessionId = sessionId
         self.debounceInterval = debounceInterval
     }
 
@@ -77,21 +83,29 @@ final class FSEventsMonitor: @unchecked Sendable {
         // so we need to trigger a full rescan instead of processing individual paths
         for flag in flags {
             if flag & UInt32(kFSEventStreamEventFlagMustScanSubDirs) != 0 {
+                issueSubject.send(
+                    AppOperationMessage(
+                        level: .warning,
+                        title: "Live Monitoring Requested a Rescan",
+                        message: "macOS reported that precise file events were unavailable for this batch. DiskSight will run a quick refresh to catch up.",
+                        source: "Monitoring"
+                    )
+                )
                 rescanSubject.send()
                 return
             }
         }
 
         lock.lock()
-        for path in paths {
-            pendingPaths.insert(path)
+        for (index, path) in paths.enumerated() {
+            pendingEventFlags[path, default: 0] |= flags[index]
         }
         lock.unlock()
 
         // Reset debounce timer
         DispatchQueue.main.async { [weak self] in
             self?.debounceTimer?.invalidate()
-            self?.debounceTimer = Timer.scheduledTimer(withTimeInterval: self?.debounceInterval ?? 2.0, repeats: false) { [weak self] _ in
+            self?.debounceTimer = Timer.scheduledTimer(withTimeInterval: self?.debounceInterval ?? 1.0, repeats: false) { [weak self] _ in
                 self?.processPendingEvents()
             }
         }
@@ -118,58 +132,174 @@ final class FSEventsMonitor: @unchecked Sendable {
 
     private func processPendingEvents() {
         lock.lock()
-        let paths = pendingPaths
-        pendingPaths.removeAll()
+        let eventFlagsByPath = pendingEventFlags
+        pendingEventFlags.removeAll()
         lock.unlock()
 
-        guard !paths.isEmpty else { return }
+        guard !eventFlagsByPath.isEmpty else { return }
 
         Task {
             let fm = FileManager.default
             var upsertNodes: [FileNode] = []
             var deletePaths: [String] = []
+            var recursiveDeletePaths: [String] = []
+            var directorySyncRoots = Set<String>()
+            var requiresRescan = false
 
             let resourceKeys: Set<URLResourceKey> = [
-                .fileSizeKey, .isDirectoryKey,
+                .fileSizeKey, .isDirectoryKey, .isRegularFileKey,
                 .contentModificationDateKey, .contentAccessDateKey,
-                .creationDateKey, .typeIdentifierKey
+                .creationDateKey, .typeIdentifierKey, .isSymbolicLinkKey
             ]
 
-            // Classify paths into upserts vs deletes
-            for path in paths {
+            // Classify paths into upserts vs deletes. Directory rename events are
+            // escalated to quickSync because their descendants inherit new paths.
+            for (path, flags) in eventFlagsByPath {
+                let isDirectoryEvent = flags & UInt32(kFSEventStreamEventFlagItemIsDir) != 0
+                let isRenameEvent = flags & UInt32(kFSEventStreamEventFlagItemRenamed) != 0
+
                 if fm.fileExists(atPath: path) {
                     let url = URL(fileURLWithPath: path)
                     guard let values = try? url.resourceValues(forKeys: resourceKeys) else { continue }
+                    if values.isSymbolicLink == true { continue }
+
+                    let isDirectory = values.isDirectory ?? false
+                    if !isDirectory && values.isRegularFile != true { continue }
+
+                    if isRenameEvent && isDirectory {
+                        requiresRescan = true
+                        continue
+                    }
+
+                    if isDirectory {
+                        directorySyncRoots.insert(path)
+                        continue
+                    }
+
                     upsertNodes.append(FileNode(
                         path: path,
                         name: url.lastPathComponent,
                         parentPath: path == "/" ? nil : url.deletingLastPathComponent().path,
                         size: Int64(values.fileSize ?? 0),
-                        isDirectory: values.isDirectory ?? false,
+                        isDirectory: isDirectory,
                         modifiedAt: values.contentModificationDate?.timeIntervalSince1970,
                         accessedAt: values.contentAccessDate?.timeIntervalSince1970,
                         createdAt: values.creationDate?.timeIntervalSince1970,
-                        fileType: values.typeIdentifier
+                        fileType: values.typeIdentifier,
+                        scanSessionId: sessionId
                     ))
                 } else {
-                    deletePaths.append(path)
+                    if isDirectoryEvent {
+                        recursiveDeletePaths.append(path)
+                        if isRenameEvent {
+                            requiresRescan = true
+                        }
+                    } else {
+                        deletePaths.append(path)
+                    }
                 }
             }
 
-            // Batch DB operations (single DELETE query per 500 instead of N individual calls)
-            if !deletePaths.isEmpty {
-                try? await repository.deleteFiles(paths: deletePaths)
+            if requiresRescan {
+                rescanSubject.send()
+                return
             }
-            if !upsertNodes.isEmpty {
-                try? await repository.insertFilesBatch(upsertNodes)
+
+            do {
+                // Batch DB operations (single DELETE query per 500 instead of N individual calls)
+                if !recursiveDeletePaths.isEmpty {
+                    try await repository.deleteFilesRecursive(paths: recursiveDeletePaths)
+                }
+                if !deletePaths.isEmpty {
+                    try await repository.deleteFiles(paths: deletePaths)
+                }
+                if !upsertNodes.isEmpty {
+                    try await repository.insertFilesBatch(upsertNodes)
+                }
+
+                if let sessionId {
+                    let scanner = FileScanner(repository: repository)
+                    for rootPath in minimalDirectoryRoots(from: directorySyncRoots) {
+                        await scanner.syncSubtree(rootURL: URL(fileURLWithPath: rootPath), sessionId: sessionId)
+                        if let directoryNode = refreshedDirectoryNode(atPath: rootPath, resourceKeys: resourceKeys) {
+                            try await repository.insertFilesBatch([directoryNode])
+                        }
+                    }
+                }
+            } catch {
+                logger.error("Failed to apply FSEvents batch: \(error.localizedDescription, privacy: .public)")
+                issueSubject.send(
+                    AppOperationMessage(
+                        level: .error,
+                        title: "Live Monitoring Update Failed",
+                        message: "DiskSight could not apply a filesystem event batch. Use Refresh Metrics to resync. \(error.localizedDescription)",
+                        source: "Monitoring"
+                    )
+                )
+                return
             }
 
             // Recalculate ancestor directory sizes for all affected paths
-            try? await repository.updateAncestorSizes(forPaths: paths)
+            let affectedPaths = Set(eventFlagsByPath.keys).union(directorySyncRoots)
+            do {
+                try await repository.updateAncestorSizes(forPaths: affectedPaths)
+                try await repository.refreshRootDirectorySize()
+            } catch {
+                logger.error("Failed to refresh directory sizes after FSEvents batch: \(error.localizedDescription, privacy: .public)")
+                issueSubject.send(
+                    AppOperationMessage(
+                        level: .warning,
+                        title: "Live Monitoring Needs a Refresh",
+                        message: "DiskSight applied live filesystem changes but could not fully recompute directory sizes. Use Refresh Metrics to resync. \(error.localizedDescription)",
+                        source: "Monitoring"
+                    )
+                )
+            }
 
             // Signal batch complete — AppState subscribes to this for cache invalidation
-            batchProcessedSubject.send(paths.count)
+            batchProcessedSubject.send(eventFlagsByPath.count)
         }
+    }
+
+    private func minimalDirectoryRoots(from paths: Set<String>) -> [String] {
+        let sorted = paths.sorted {
+            if $0.count == $1.count {
+                return $0 < $1
+            }
+            return $0.count < $1.count
+        }
+
+        var roots: [String] = []
+        for path in sorted {
+            let covered = roots.contains { root in
+                path == root || root == "/" || path.hasPrefix(root + "/")
+            }
+            if !covered {
+                roots.append(path)
+            }
+        }
+        return roots
+    }
+
+    private func refreshedDirectoryNode(atPath path: String, resourceKeys: Set<URLResourceKey>) -> FileNode? {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        guard let values = try? url.resourceValues(forKeys: resourceKeys) else { return nil }
+        guard values.isDirectory == true, values.isSymbolicLink != true else { return nil }
+
+        let totalSize = (try? repository.childrenWithSizesConcurrent(ofPath: path))?.reduce(Int64(0)) { $0 + $1.size } ?? 0
+        return FileNode(
+            path: path,
+            name: url.lastPathComponent,
+            parentPath: path == "/" ? nil : url.deletingLastPathComponent().path,
+            size: totalSize,
+            isDirectory: true,
+            modifiedAt: values.contentModificationDate?.timeIntervalSince1970,
+            accessedAt: values.contentAccessDate?.timeIntervalSince1970,
+            createdAt: values.creationDate?.timeIntervalSince1970,
+            fileType: values.typeIdentifier,
+            scanSessionId: sessionId
+        )
     }
 }
 

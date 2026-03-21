@@ -53,6 +53,10 @@
 		FF66AA77BB88CC99DD000004 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000003 /* SettingsView.swift */; };
 		FF66AA77BB88CC99DD000006 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000005 /* OnboardingView.swift */; };
 		FF66AA77BB88CC99DD000008 /* FileRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000007 /* FileRowView.swift */; };
+		A20000000000000000000021 /* SmartCleanupServiceLLMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000022 /* SmartCleanupServiceLLMTests.swift */; };
+		A20000000000000000000025 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 17C54FA1597D67FCF5828176 /* GRDB */; };
+		A20000000000000000000026 /* xxHash-Swift in Frameworks */ = {isa = PBXBuildFile; productRef = 3DA1B721167DDD7A6A3C800A /* xxHash-Swift */; };
+		A20000000000000000000027 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = B20000000000000000000002 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -82,6 +86,7 @@
 		A100000000000000000000B7 /* OllamaClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaClient.swift; sourceTree = "<group>"; };
 		A100000000000000000000B9 /* SmartCleanupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCleanupService.swift; sourceTree = "<group>"; };
 		A100000000000000000000BB /* SmartCleanupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCleanupView.swift; sourceTree = "<group>"; };
+		A20000000000000000000022 /* SmartCleanupServiceLLMTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SmartCleanupServiceLLMTests.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550001 /* TreemapLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreemapLayout.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550003 /* TreemapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreemapView.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationContainer.swift; sourceTree = "<group>"; };
@@ -131,6 +136,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				50215A77515AC38D1B8A5B09 /* Cocoa.framework in Frameworks */,
+				A20000000000000000000025 /* GRDB in Frameworks */,
+				A20000000000000000000026 /* xxHash-Swift in Frameworks */,
+				A20000000000000000000027 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -165,6 +173,7 @@
 			isa = PBXGroup;
 			children = (
 				98298E95572A74422A37D37C /* DiskSight */,
+				A20000000000000000000023 /* DiskSightTests */,
 				C863DA5204F95EC573510473 /* Products */,
 				0D84D44E013410F8DB0F46F3 /* Frameworks */,
 			);
@@ -246,6 +255,15 @@
 				A100000000000000000000BB /* SmartCleanupView.swift */,
 			);
 			path = SmartCleanup;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000023 /* DiskSightTests */ = {
+			isa = PBXGroup;
+			children = (
+				780D1B5C81EB6ACB1D978A82 /* SyncCompletionGatingTests.swift */,
+				A20000000000000000000022 /* SmartCleanupServiceLLMTests.swift */,
+			);
+			path = DiskSightTests;
 			sourceTree = "<group>";
 		};
 		A68E5A9978FC822A593DEC49 /* Shared */ = {
@@ -400,6 +418,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		A20000000000000000000024 /* DiskSightTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA3F953115A0D39D68FE752D /* Build configuration list for PBXNativeTarget "DiskSightTests" */;
+			buildPhases = (
+				95259BE491C5E003192C94C6 /* Sources */,
+				E288675118E984DE642CE5D1 /* Frameworks */,
+				FDF075E4299F3E3E2524A131 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				8D03A8530F83D643E29D0E89 /* PBXTargetDependency */,
+			);
+			name = DiskSightTests;
+			packageProductDependencies = (
+				17C54FA1597D67FCF5828176 /* GRDB */,
+				3DA1B721167DDD7A6A3C800A /* xxHash-Swift */,
+				B20000000000000000000002 /* Sparkle */,
+			);
+			productName = DiskSightTests;
+			productReference = 2A5B8A509C7E1C9C29FB889D /* DiskSightTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		BED5BDCFC6D711BC9CC34F0D /* DiskSight */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 88A9556C78F4D881C352E222 /* Build configuration list for PBXNativeTarget "DiskSight" */;
@@ -446,6 +487,7 @@
 			projectRoot = "";
 			targets = (
 				BED5BDCFC6D711BC9CC34F0D /* DiskSight */,
+				A20000000000000000000024 /* DiskSightTests */,
 			);
 		};
 /* End PBXProject section */
@@ -474,6 +516,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				276AB21C5D3C91F1C5E772EE /* SyncCompletionGatingTests.swift in Sources */,
+				A20000000000000000000021 /* SmartCleanupServiceLLMTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -680,7 +723,7 @@
 		E84EEE2F6C4761B37ECB5547 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "";
+				BUNDLE_LOADER = "$(TEST_HOST)";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.disksight.appTests;
@@ -689,14 +732,15 @@
 				SDKROOT = macosx;
 				SWIFT_MODULE_NAME = DiskSightTests;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DiskSight.app/Contents/MacOS/DiskSight";
+				TEST_TARGET_NAME = DiskSight;
 			};
 			name = Release;
 		};
 		EF5283B301E577F51E73F4B3 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "";
+				BUNDLE_LOADER = "$(TEST_HOST)";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.disksight.appTests;
@@ -705,7 +749,8 @@
 				SDKROOT = macosx;
 				SWIFT_MODULE_NAME = DiskSightTests;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DiskSight.app/Contents/MacOS/DiskSight";
+				TEST_TARGET_NAME = DiskSight;
 			};
 			name = Debug;
 		};
@@ -758,7 +803,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		AA3F953115A0D39D68FE752D /* Build configuration list for <deleted target> */ = {
+		AA3F953115A0D39D68FE752D /* Build configuration list for PBXNativeTarget "DiskSightTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				E84EEE2F6C4761B37ECB5547 /* Release */,

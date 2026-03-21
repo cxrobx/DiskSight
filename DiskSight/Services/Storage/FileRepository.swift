@@ -3,7 +3,7 @@ import GRDB
 
 actor FileRepository {
     private let database: Database
-    private let growthCacheVersion = 2
+    private let growthCacheVersion = 3
 
     init(database: Database) {
         self.database = database
@@ -695,6 +695,39 @@ actor FileRepository {
         }
     }
 
+    /// Recomputes the current root node from its direct children.
+    /// Needed when the scan root itself is "/" because updateAncestorSizes stops before it.
+    func refreshRootDirectorySize() throws {
+        try database.dbPool.write { db in
+            guard var root = try FileNode
+                .filter(Column("parent_path") == nil)
+                .fetchOne(db)
+                ?? FileNode
+                .filter(Column("parent_path") == "")
+                .filter(Column("is_directory") == true)
+                .fetchOne(db)
+                ?? FileNode
+                .filter(Column("parent_path") == "/..")
+                .filter(Column("is_directory") == true)
+                .fetchOne(db)
+            else { return }
+
+            let total = try Int64.fetchOne(
+                db,
+                sql: """
+                    SELECT COALESCE(SUM(size), 0)
+                    FROM files
+                    WHERE parent_path = ?
+                    """,
+                arguments: [root.path]
+            ) ?? 0
+
+            guard root.size != total else { return }
+            root.size = total
+            try root.insert(db, onConflict: .replace)
+        }
+    }
+
     // MARK: - Export
 
     func allFiles(forSession sessionId: Int64) throws -> [FileNode] {
@@ -717,51 +750,7 @@ actor FileRepository {
     // MARK: - Growth Analysis
 
     func recentlyGrowingFolders(createdAfter cutoff: Double, limit: Int = 50, excludePrefix: String? = nil) throws -> [FolderGrowth] {
-        try database.dbPool.read { db in
-            let likePattern = excludePrefix.map { $0 + "%" }
-            let innerExclude = likePattern != nil ? "\n                      AND parent_path NOT LIKE ?" : ""
-            let outerExclude = likePattern != nil ? "\n                  AND f_dir.path NOT LIKE ?" : ""
-            let args: StatementArguments
-            if let pat = likePattern {
-                args = [cutoff, pat, pat, limit]
-            } else {
-                args = [cutoff, limit]
-            }
-
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT
-                    f_dir.path AS folder_path,
-                    f_dir.name AS folder_name,
-                    f_dir.size AS total_folder_size,
-                    COALESCE(growth.recent_size, 0) AS recent_growth_size,
-                    COALESCE(growth.recent_count, 0) AS recent_file_count
-                FROM files f_dir
-                INNER JOIN (
-                    SELECT parent_path, SUM(size) AS recent_size, COUNT(*) AS recent_count
-                    FROM files
-                    WHERE is_directory = 0
-                      AND size > 0
-                      AND created_at IS NOT NULL
-                      AND created_at >= ?
-                      AND path NOT LIKE '/dev/%'
-                      AND (file_type IS NULL OR file_type NOT IN ('public.character-special', 'public.block-special'))\(innerExclude)
-                    GROUP BY parent_path
-                ) growth ON growth.parent_path = f_dir.path
-                WHERE f_dir.is_directory = 1\(outerExclude)
-                ORDER BY growth.recent_size DESC
-                LIMIT ?
-                """, arguments: args)
-
-            return rows.map { row in
-                FolderGrowth(
-                    folderPath: row["folder_path"],
-                    folderName: row["folder_name"],
-                    totalFolderSize: row["total_folder_size"],
-                    recentGrowthSize: row["recent_growth_size"],
-                    recentFileCount: row["recent_file_count"]
-                )
-            }
-        }
+        try recentlyGrowingFoldersConcurrent(createdAfter: cutoff, limit: limit, excludePrefix: excludePrefix)
     }
 
     func cachedGrowthFolders(sessionId: Int64, period: GrowthPeriod) throws -> [FolderGrowth]? {
@@ -827,47 +816,53 @@ actor FileRepository {
 
     nonisolated func recentlyGrowingFoldersConcurrent(createdAfter cutoff: Double, limit: Int = 50, excludePrefix: String? = nil) throws -> [FolderGrowth] {
         try database.dbPool.read { db in
+            // Step 1: Aggregate top folders by recent growth (covered by idx_files_growth partial index)
             let likePattern = excludePrefix.map { $0 + "%" }
-            let innerExclude = likePattern != nil ? "\n                      AND parent_path NOT LIKE ?" : ""
-            let outerExclude = likePattern != nil ? "\n                  AND f_dir.path NOT LIKE ?" : ""
-            let args: StatementArguments
-            if let pat = likePattern {
-                args = [cutoff, pat, pat, limit]
-            } else {
-                args = [cutoff, limit]
+            let excludeClause = likePattern != nil ? "\n                  AND parent_path NOT LIKE ?" : ""
+            var aggArgs: [DatabaseValueConvertible] = [cutoff]
+            if let pat = likePattern { aggArgs.append(pat) }
+            aggArgs.append(limit)
+
+            let growthRows = try Row.fetchAll(db, sql: """
+                SELECT parent_path, SUM(size) AS recent_size, COUNT(*) AS recent_count
+                FROM files
+                WHERE is_directory = 0
+                  AND size > 0
+                  AND created_at >= ?\(excludeClause)
+                GROUP BY parent_path
+                ORDER BY recent_size DESC
+                LIMIT ?
+                """, arguments: StatementArguments(aggArgs))
+
+            guard !growthRows.isEmpty else { return [] }
+
+            // Step 2: Batch-fetch directory metadata for the top paths
+            let parentPaths: [String] = growthRows.map { $0["parent_path"] }
+            let placeholders = parentPaths.map { _ in "?" }.joined(separator: ", ")
+            let dirArgs = StatementArguments(parentPaths)
+
+            let dirRows = try Row.fetchAll(db, sql: """
+                SELECT path, name, size FROM files
+                WHERE is_directory = 1 AND path IN (\(placeholders))
+                """, arguments: dirArgs)
+
+            var dirLookup: [String: (name: String, size: Int64)] = [:]
+            for row in dirRows {
+                let path: String = row["path"]
+                dirLookup[path] = (name: row["name"], size: row["size"])
             }
 
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT
-                    f_dir.path AS folder_path,
-                    f_dir.name AS folder_name,
-                    f_dir.size AS total_folder_size,
-                    COALESCE(growth.recent_size, 0) AS recent_growth_size,
-                    COALESCE(growth.recent_count, 0) AS recent_file_count
-                FROM files f_dir
-                INNER JOIN (
-                    SELECT parent_path, SUM(size) AS recent_size, COUNT(*) AS recent_count
-                    FROM files
-                    WHERE is_directory = 0
-                      AND size > 0
-                      AND created_at IS NOT NULL
-                      AND created_at >= ?
-                      AND path NOT LIKE '/dev/%'
-                      AND (file_type IS NULL OR file_type NOT IN ('public.character-special', 'public.block-special'))\(innerExclude)
-                    GROUP BY parent_path
-                ) growth ON growth.parent_path = f_dir.path
-                WHERE f_dir.is_directory = 1\(outerExclude)
-                ORDER BY growth.recent_size DESC
-                LIMIT ?
-                """, arguments: args)
-
-            return rows.map { row in
-                FolderGrowth(
-                    folderPath: row["folder_path"],
-                    folderName: row["folder_name"],
-                    totalFolderSize: row["total_folder_size"],
-                    recentGrowthSize: row["recent_growth_size"],
-                    recentFileCount: row["recent_file_count"]
+            // Combine: growth aggregate + directory metadata
+            return growthRows.map { row in
+                let parentPath: String = row["parent_path"]
+                let dirInfo = dirLookup[parentPath]
+                let folderName = dirInfo?.name ?? URL(fileURLWithPath: parentPath).lastPathComponent
+                return FolderGrowth(
+                    folderPath: parentPath,
+                    folderName: folderName,
+                    totalFolderSize: dirInfo?.size ?? 0,
+                    recentGrowthSize: row["recent_size"],
+                    recentFileCount: row["recent_count"]
                 )
             }
         }
@@ -940,6 +935,21 @@ actor FileRepository {
                 sql: "DELETE FROM cleanup_recommendations WHERE scan_session_id = ?",
                 arguments: [sessionId]
             )
+        }
+    }
+
+    func deleteRecommendations(forFilePaths paths: [String]) throws {
+        guard !paths.isEmpty else { return }
+        try database.dbPool.write { db in
+            for chunk in stride(from: 0, to: paths.count, by: 500) {
+                let end = min(chunk + 500, paths.count)
+                let batch = Array(paths[chunk..<end])
+                let placeholders = batch.map { _ in "?" }.joined(separator: ",")
+                try db.execute(
+                    sql: "DELETE FROM cleanup_recommendations WHERE file_path IN (\(placeholders))",
+                    arguments: StatementArguments(batch)
+                )
+            }
         }
     }
 

@@ -3,6 +3,7 @@ import SwiftUI
 struct OverviewView: View {
     @EnvironmentObject var appState: AppState
     @State private var diskInfo: DiskInfo?
+    @State private var liveRefreshTask: Task<Void, Never>?
 
     private var topFolders: [FileNode] { appState.overviewTopFolders ?? [] }
     private var fileCount: Int { appState.overviewFileCount ?? 0 }
@@ -40,9 +41,17 @@ struct OverviewView: View {
         }
         .onChange(of: appState.scanState) {
             if appState.scanState == .completed {
-                appState.invalidateCache()
-                Task { await appState.loadOverviewData() }
+                Task {
+                    loadDiskInfo()
+                    await appState.refreshOverviewData()
+                }
             }
+        }
+        .onChange(of: appState.dataVersion) { _, _ in
+            scheduleLiveRefresh()
+        }
+        .onDisappear {
+            liveRefreshTask?.cancel()
         }
     }
 
@@ -301,6 +310,16 @@ struct OverviewView: View {
             let total = Int64(values.volumeTotalCapacity ?? 0)
             let free = values.volumeAvailableCapacityForImportantUsage ?? 0
             diskInfo = DiskInfo(totalSpace: total, freeSpace: free)
+        }
+    }
+
+    private func scheduleLiveRefresh() {
+        liveRefreshTask?.cancel()
+        liveRefreshTask = Task {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            loadDiskInfo()
+            await appState.refreshOverviewData()
         }
     }
 

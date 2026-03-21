@@ -1,16 +1,18 @@
 import Foundation
+import OSLog
 
 /// Orchestrates file classification by combining the deterministic rule engine
 /// with existing analysis signals (duplicates, stale, cache) and optional LLM enhancement.
 actor SmartCleanupService {
+    private let logger = Logger(subsystem: "com.disksight.app", category: "SmartCleanupService")
     private let classifier: FileClassifier
     private let repository: FileRepository
-    private let ollamaClient: OllamaClient?
+    private let llmService: CleanupLLMServing?
 
-    init(classifier: FileClassifier, repository: FileRepository, ollamaClient: OllamaClient?) {
+    init(classifier: FileClassifier, repository: FileRepository, llmService: CleanupLLMServing?) {
         self.classifier = classifier
         self.repository = repository
-        self.ollamaClient = ollamaClient
+        self.llmService = llmService
     }
 
     /// Run the full analysis pipeline with paginated file loading:
@@ -18,9 +20,10 @@ actor SmartCleanupService {
     /// 2. Load + classify files in pages of 5000 — yields results immediately
     /// 3. Load cross-analysis signals after classification
     /// 4. Merge signals into results
-    func analyze(sessionId: Int64, useLLM: Bool) -> AsyncStream<(ClassificationProgress, [CleanupRecommendation])> {
+    func analyze(sessionId: Int64, llmModel: String?) -> AsyncStream<(ClassificationProgress, [CleanupRecommendation])> {
         let classifier = self.classifier
         let repository = self.repository
+        let llmService = self.llmService
         let pageSize = 5000
 
         return AsyncStream { continuation in
@@ -44,9 +47,19 @@ actor SmartCleanupService {
                         guard !page.isEmpty else { break }
 
                         // Classify this page synchronously (pure pattern matching, fast)
-                        let pageRecs = await classifier.classifyBatch(
+                        var pageRecs = await classifier.classifyBatch(
                             files: page, sessionId: sessionId
                         )
+
+                        if let llmService, let llmModel, !llmModel.isEmpty, !pageRecs.isEmpty {
+                            pageRecs = await self.enhanceWithLLM(
+                                recommendations: pageRecs,
+                                files: page,
+                                llmService: llmService,
+                                model: llmModel
+                            )
+                        }
+
                         allRecs.append(contentsOf: pageRecs)
                         processedSoFar += page.count
 
@@ -82,7 +95,7 @@ actor SmartCleanupService {
                     }
 
                 } catch {
-                    // Silently finish on error — caller sees whatever results were yielded
+                    logger.error("Smart cleanup analysis stream failed: \(error.localizedDescription, privacy: .public)")
                 }
                 continuation.finish()
             }
@@ -113,7 +126,67 @@ actor SmartCleanupService {
         return try await repository.cacheMatchingPaths(patterns: expandedPatterns)
     }
 
+    // MARK: - LLM Enhancement
+
+    private func enhanceWithLLM(
+        recommendations: [CleanupRecommendation],
+        files: [FileNode],
+        llmService: CleanupLLMServing,
+        model: String
+    ) async -> [CleanupRecommendation] {
+        let filesByPath = Dictionary(uniqueKeysWithValues: files.map { ($0.path, $0) })
+        let candidates = recommendations.compactMap { rec -> (path: String, name: String, size: Int64, ext: String)? in
+            guard let file = filesByPath[rec.filePath] else { return nil }
+            let ext = (file.name as NSString).pathExtension.lowercased()
+            return (path: file.path, name: file.name, size: file.size, ext: ext)
+        }
+
+        guard !candidates.isEmpty else { return recommendations }
+
+        var analysesByPath: [String: LLMFileAnalysis] = [:]
+        for chunkStart in stride(from: 0, to: candidates.count, by: 50) {
+            let chunkEnd = min(chunkStart + 50, candidates.count)
+            let chunk = Array(candidates[chunkStart..<chunkEnd])
+            let analyses = await llmService.analyzeFiles(files: chunk, model: model)
+            for analysis in analyses {
+                analysesByPath[analysis.filePath] = analysis
+            }
+        }
+
+        return recommendations.map { rec in
+            guard let analysis = analysesByPath[rec.filePath] else { return rec }
+            return mergeLLMAnalysis(rec, analysis: analysis)
+        }
+    }
+
     // MARK: - Signal Merging
+
+    private func mergeLLMAnalysis(
+        _ rec: CleanupRecommendation,
+        analysis: LLMFileAnalysis
+    ) -> CleanupRecommendation {
+        let explanation = analysis.explanation.isEmpty ? rec.explanation : analysis.explanation
+        let category = rec.category == .unknown ? (analysis.category ?? rec.category) : rec.category
+        let confidence = analysis.confidence.map { max(rec.confidence, $0) } ?? rec.confidence
+        let llmRaisedConfidence = analysis.confidence.map { $0 > rec.confidence } ?? false
+        let isEnhanced = !analysis.explanation.isEmpty || analysis.category != nil || analysis.confidence != nil
+
+        return CleanupRecommendation(
+            id: rec.id,
+            filePath: rec.filePath,
+            fileName: rec.fileName,
+            fileSize: rec.fileSize,
+            category: category,
+            confidence: confidence,
+            explanation: explanation,
+            signals: rec.signals,
+            llmEnhanced: rec.llmEnhanced || isEnhanced,
+            scanSessionId: rec.scanSessionId,
+            llmRaisedConfidence: rec.llmRaisedConfidence || llmRaisedConfidence,
+            accessedAt: rec.accessedAt,
+            modifiedAt: rec.modifiedAt
+        )
+    }
 
     /// Merge cross-analysis signals into a recommendation, potentially boosting confidence.
     private func mergeSignals(
@@ -140,9 +213,9 @@ actor SmartCleanupService {
         let boostSignals: Set<CleanupSignal> = [.stale, .duplicate, .knownCache, .buildArtifact, .tempFile]
         let matchCount = signals.filter { boostSignals.contains($0) }.count
 
-        if matchCount >= 2 && confidence == .caution {
+        if !rec.llmRaisedConfidence && matchCount >= 2 && confidence == .caution {
             confidence = .safe
-        } else if matchCount >= 2 && confidence == .risky {
+        } else if !rec.llmRaisedConfidence && matchCount >= 2 && confidence == .risky {
             confidence = .caution
         }
 
@@ -157,6 +230,7 @@ actor SmartCleanupService {
             signals: signals,
             llmEnhanced: rec.llmEnhanced,
             scanSessionId: rec.scanSessionId,
+            llmRaisedConfidence: rec.llmRaisedConfidence,
             accessedAt: rec.accessedAt,
             modifiedAt: rec.modifiedAt
         )

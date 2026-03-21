@@ -164,14 +164,13 @@ struct StaleFilesView: View {
 
     private func trashFiles(_ files: [FileNode]) {
         Task {
-            for file in files {
-                let url = URL(fileURLWithPath: file.path)
-                do {
-                    try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                    try await appState.fileRepository.deleteFile(path: file.path)
-                } catch {}
-            }
-            appState.invalidateCache()
+            let result = await appState.trashIndexedPaths(
+                files.map(\.path),
+                actionName: "cleaning stale files"
+            )
+            guard result.deletedCount > 0 else { return }
+
+            await appState.refreshAfterIndexedFileMutation()
             isLoading = true
             await appState.loadStaleFiles(threshold: appState.staleThreshold)
             isLoading = false

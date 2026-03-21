@@ -10,3 +10,6 @@ build/
 *.xcworkspace/xcuserdata
 generate_pbxproj.py
 .build/
+.index-build/
+.serena/
+.claude/settings.local.json

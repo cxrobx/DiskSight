@@ -16,9 +16,16 @@ struct LLMFileAnalysis {
     let explanation: String
 }
 
+protocol CleanupLLMServing: Sendable {
+    func analyzeFiles(
+        files: [(path: String, name: String, size: Int64, ext: String)],
+        model: String
+    ) async -> [LLMFileAnalysis]
+}
+
 // MARK: - Ollama Client
 
-actor OllamaClient {
+actor OllamaClient: CleanupLLMServing {
     private let baseURL: URL
     private let session: URLSession
 

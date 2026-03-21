@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import OSLog
 import UniformTypeIdentifiers
 
 enum SidebarSection: String, CaseIterable, Identifiable {
@@ -48,16 +49,125 @@ struct ScanProgress: Sendable {
     var totalSize: Int64 = 0
     var currentPath: String = ""
     var completed: Bool = false
+    var errorMessage: String?
+}
+
+struct AppAlertInfo: Identifiable, Sendable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+enum AppActivityLevel: String, Sendable {
+    case info
+    case warning
+    case error
+
+    var icon: String {
+        switch self {
+        case .info: return "info.circle"
+        case .warning: return "exclamationmark.triangle"
+        case .error: return "xmark.octagon"
+        }
+    }
+}
+
+struct AppOperationMessage: Sendable {
+    let level: AppActivityLevel
+    let title: String
+    let message: String
+    let source: String
+}
+
+struct AppActivityEntry: Identifiable, Sendable {
+    let id = UUID()
+    let level: AppActivityLevel
+    let title: String
+    let message: String
+    let source: String
+    var timestamp: Date
+    var occurrenceCount: Int
+}
+
+struct TrashFailure: Sendable {
+    let path: String
+    let reason: String
+}
+
+struct TrashOperationResult: Sendable {
+    let requestedCount: Int
+    let removedFromDiskCount: Int
+    let removedMissingCount: Int
+    let deletedPaths: [String]
+    let failures: [TrashFailure]
+
+    var deletedCount: Int { removedFromDiskCount + removedMissingCount }
+    var hasFailures: Bool { !failures.isEmpty }
 }
 
 @MainActor
 final class AppState: ObservableObject {
+    nonisolated static func isTestEnvironment(_ environment: [String: String]) -> Bool {
+        [
+            "XCTestConfigurationFilePath",
+            "XCTestBundlePath",
+            "XCTestSessionIdentifier"
+        ].contains { key in
+            guard let value = environment[key] else { return false }
+            return !value.isEmpty
+        }
+    }
+
+    static let isRunningTests = isTestEnvironment(ProcessInfo.processInfo.environment)
+
+    private let logger = Logger(subsystem: "com.disksight.app", category: "AppState")
+    private let maxActivityLogEntries = 200
+
     nonisolated static func syncCompletedSuccessfully(taskIsCancelled: Bool, lastProgress: ScanProgress?) -> Bool {
         guard !taskIsCancelled else { return false }
         return lastProgress?.completed ?? false
     }
 
-    @Published var selectedSection: SidebarSection = .overview
+    nonisolated static func storedStaleThreshold() -> StaleThreshold {
+        guard let rawValue = UserDefaults.standard.string(forKey: "staleThreshold"),
+              let threshold = StaleThreshold(rawValue: rawValue) else {
+            return .oneYear
+        }
+        return threshold
+    }
+
+    private enum SyncTrigger {
+        case manualRefresh
+        case monitorReplayGap
+        case journalRecovery
+
+        var source: String { "Sync" }
+
+        var failureTitle: String {
+            switch self {
+            case .manualRefresh:
+                return "Refresh Failed"
+            case .monitorReplayGap:
+                return "Live Sync Failed"
+            case .journalRecovery:
+                return "Recovery Sync Failed"
+            }
+        }
+
+        var shouldAlertOnFailure: Bool {
+            self == .manualRefresh
+        }
+    }
+
+    @Published var selectedSection: SidebarSection = .overview {
+        didSet {
+            if selectedSection == .growth, growthDisplayedDataVersion != dataVersion {
+                scheduleAutoGrowthRefresh()
+            } else if selectedSection != .growth {
+                cancelAutoGrowthRefresh()
+            }
+        }
+    }
     @Published var scanState: ScanState = .idle
     @Published var scanRootPath: URL?
     @Published var lastScanSession: ScanSession?
@@ -67,6 +177,22 @@ final class AppState: ObservableObject {
     @Published var isExportingCSV: Bool = false
     @Published var csvExportDone: Bool = false
     @Published var isSyncing: Bool = false
+    @Published var activeAlert: AppAlertInfo?
+    @Published var activityLog: [AppActivityEntry] = []
+    @Published var unreadActivityCount: Int = 0
+    @Published var showActivityLog: Bool = false {
+        didSet {
+            if showActivityLog {
+                unreadActivityCount = 0
+            }
+        }
+    }
+    @Published var monitoringEnabled: Bool = UserDefaults.standard.object(forKey: "monitoringEnabled") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(monitoringEnabled, forKey: "monitoringEnabled")
+            handleMonitoringPreferenceChange()
+        }
+    }
 
     /// Incremented each time FSEvents batch processing completes.
     /// Views can observe this to refresh stale data (e.g., folder tree sizes).
@@ -95,7 +221,11 @@ final class AppState: ObservableObject {
 
     // Stale Files
     @Published var staleFiles: [FileNode]?
-    @Published var staleThreshold: StaleThreshold = .oneYear
+    @Published var staleThreshold: StaleThreshold = AppState.storedStaleThreshold() {
+        didSet {
+            UserDefaults.standard.set(staleThreshold.rawValue, forKey: "staleThreshold")
+        }
+    }
 
     // Cache
     @Published var detectedCaches: [DetectedCache]?
@@ -106,6 +236,7 @@ final class AppState: ObservableObject {
     @Published var growthLoadingPeriod: GrowthPeriod?
     private var growthCache: [GrowthPeriod: [FolderGrowth]] = [:]
     private var growthCacheDataVersion: Int = -1
+    private var growthDisplayedDataVersion: Int = -1
 
     // Smart Cleanup
     @Published var cleanupRecommendations: [CleanupRecommendation]?
@@ -114,35 +245,61 @@ final class AppState: ObservableObject {
     @Published var isAnalyzingCleanup: Bool = false
     @Published var isOllamaAvailable: Bool = false
     @Published var ollamaModels: [String] = []
-    @Published var selectedOllamaModel: String = ""
+    @Published var ollamaBaseURL: String = UserDefaults.standard.string(forKey: "ollamaURL") ?? "http://localhost:11434" {
+        didSet {
+            UserDefaults.standard.set(ollamaBaseURL, forKey: "ollamaURL")
+        }
+    }
+    @Published var selectedOllamaModel: String = UserDefaults.standard.string(forKey: "ollamaModel") ?? "" {
+        didSet {
+            UserDefaults.standard.set(selectedOllamaModel, forKey: "ollamaModel")
+        }
+    }
 
     private var scanTask: Task<Void, Never>?
     private var incrementalSyncTask: Task<Void, Never>?
     private var cachePrefetchTask: Task<Void, Never>?
     private var growthPrefetchTask: Task<Void, Never>?
+    private var growthAutoRefreshTask: Task<Void, Never>?
+    private var growthRefreshQueued = false
     private let database: Database
     let fileRepository: FileRepository
     private var fsMonitor: FSEventsMonitor?
     private var eventCancellable: AnyCancellable?
     private var batchCancellable: AnyCancellable?
     private var rescanCancellable: AnyCancellable?
+    private var monitorIssueCancellable: AnyCancellable?
     private var terminationObserver: Any?
 
     init() {
         self.database = Database.shared
         self.fileRepository = FileRepository(database: database)
-        checkFullDiskAccess()
-        loadLastSession()
-        scheduleCacheWarmup()
-        scheduleGrowthWarmup()
+
+        if !Self.isRunningTests {
+            checkFullDiskAccess()
+            loadLastSession()
+            scheduleCacheWarmup()
+            scheduleGrowthWarmup()
+        }
 
         // Save event ID synchronously on app quit — can't await in notification handlers
-        terminationObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            self?.saveEventIdSync()
+        if !Self.isRunningTests {
+            terminationObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.willTerminateNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.saveEventIdSync()
+            }
+        }
+
+        if let startupIssue = database.startupIssue {
+            presentAlert(
+                title: startupIssue.title,
+                message: startupIssue.message,
+                level: .warning,
+                source: "Storage"
+            )
         }
     }
 
@@ -162,6 +319,7 @@ final class AppState: ObservableObject {
         incrementalSyncTask?.cancel()
         cachePrefetchTask?.cancel()
         growthPrefetchTask?.cancel()
+        cancelAutoGrowthRefresh()
         stopMonitoring()
 
         // Reset viz state — full scan means starting fresh
@@ -170,6 +328,7 @@ final class AppState: ObservableObject {
         vizBreadcrumbs = []
         growthFolders = nil
         growthCache = [:]
+        growthDisplayedDataVersion = -1
 
         invalidateCache()
         scanState = .scanning(progress: ScanProgress())
@@ -179,13 +338,35 @@ final class AppState: ObservableObject {
                 let scanner = FileScanner(repository: fileRepository)
                 let session = try await fileRepository.createScanSession(rootPath: url.path)
                 guard let sessionId = session.id else {
+                    presentAlert(
+                        title: "Scan Failed",
+                        message: "DiskSight could not create a scan session.",
+                        source: "Scan"
+                    )
                     self.scanState = .error("Failed to create scan session")
                     return
                 }
 
+                var scanFailure: String?
                 for await progress in scanner.scan(rootURL: url, sessionId: sessionId) {
+                    if let errorMessage = progress.errorMessage {
+                        scanFailure = errorMessage
+                        break
+                    }
                     self.scanState = .scanning(progress: progress)
                 }
+
+                if let scanFailure {
+                    self.scanState = .error(scanFailure)
+                    presentAlert(
+                        title: "Scan Failed",
+                        message: "DiskSight could not finish scanning the selected folder. \(scanFailure)",
+                        source: "Scan"
+                    )
+                    return
+                }
+
+                guard !Task.isCancelled else { return }
 
                 try await fileRepository.completeScanSession(id: sessionId)
                 // Clean up files and sessions from previous scans
@@ -200,6 +381,11 @@ final class AppState: ObservableObject {
                 startMonitoring(path: url.path)
             } catch {
                 if !Task.isCancelled {
+                    presentAlert(
+                        title: "Scan Failed",
+                        message: error.localizedDescription,
+                        source: "Scan"
+                    )
                     self.scanState = .error(error.localizedDescription)
                 }
             }
@@ -211,12 +397,30 @@ final class AppState: ObservableObject {
         scanState = .idle
     }
 
+    var canRefreshMetrics: Bool {
+        guard case .completed = scanState else { return false }
+        return scanRootPath != nil || lastScanSession != nil
+    }
+
+    func refreshMetrics() {
+        guard case .completed = scanState else { return }
+        guard !isSyncing else { return }
+        guard let path = scanRootPath?.path ?? lastScanSession?.rootPath else { return }
+
+        if monitoringEnabled && !(fsMonitor?.running ?? false) {
+            startMonitoring(path: path)
+        }
+
+        runIncrementalSync(path: path, trigger: .manualRefresh)
+    }
+
     // MARK: - FSEvents Monitoring
 
     func startMonitoring(path: String) {
         stopMonitoring()
+        guard monitoringEnabled else { return }
 
-        let monitor = FSEventsMonitor(repository: fileRepository)
+        let monitor = FSEventsMonitor(repository: fileRepository, sessionId: lastScanSession?.id)
         self.fsMonitor = monitor
 
         // Collect events in 2-second windows for the UI event log.
@@ -241,6 +445,7 @@ final class AppState: ObservableObject {
                 self.invalidateCache()
                 self.dataVersion += 1
                 Task { await self.refreshVisualizationData() }
+                self.scheduleAutoGrowthRefresh()
 
                 // Persist latest event ID for crash recovery
                 if let monitor = self.fsMonitor,
@@ -249,12 +454,29 @@ final class AppState: ObservableObject {
                     // Update in-memory session so handleBecameActive uses fresh event ID
                     self.lastScanSession?.lastFseventsId = Int64(eventId)
                     Task {
-                        try? await self.fileRepository.updateEventId(
-                            sessionId: sessionId,
-                            eventId: Int64(eventId)
-                        )
+                        do {
+                            try await self.fileRepository.updateEventId(
+                                sessionId: sessionId,
+                                eventId: Int64(eventId)
+                            )
+                        } catch {
+                            await MainActor.run {
+                                self.recordActivity(
+                                    level: .warning,
+                                    title: "Monitoring Position Was Not Saved",
+                                    message: "DiskSight updated live results, but could not persist the latest event marker. \(error.localizedDescription)",
+                                    source: "Monitoring"
+                                )
+                            }
+                        }
                     }
                 }
+            }
+
+        monitorIssueCancellable = monitor.issueSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] issue in
+                self?.recordActivity(issue)
             }
 
         // Subscribe to rescan requests (MustScanSubDirs).
@@ -283,8 +505,14 @@ final class AppState: ObservableObject {
                 // Start monitoring from "now" to capture new changes while sync runs
                 monitor.start(path: path, sinceEventId: UInt64(kFSEventStreamEventIdSinceNow))
                 isMonitoring = true
+                recordActivity(
+                    level: .warning,
+                    title: "Recovering Live Monitoring",
+                    message: "The saved filesystem event position is more than seven days old, so DiskSight will run a recovery refresh.",
+                    source: "Monitoring"
+                )
                 // Full walk catches the gap since the last session (>7 days stale)
-                runIncrementalSync(path: path, fullWalk: true)
+                runIncrementalSync(path: path, fullWalk: true, trigger: .journalRecovery)
                 return
             }
         }
@@ -302,7 +530,18 @@ final class AppState: ObservableObject {
         eventCancellable = nil
         batchCancellable = nil
         rescanCancellable = nil
+        monitorIssueCancellable = nil
         isMonitoring = false
+    }
+
+    private func handleMonitoringPreferenceChange() {
+        guard case .completed = scanState else { return }
+
+        if monitoringEnabled, let rootPath = scanRootPath?.path ?? lastScanSession?.rootPath {
+            startMonitoring(path: rootPath)
+        } else {
+            stopMonitoring()
+        }
     }
 
     /// Synchronous event ID save — safe to call from notification handlers and deinit
@@ -329,7 +568,7 @@ final class AppState: ObservableObject {
             let fiveMinutesAgo = Date().timeIntervalSince1970 - 300
             if completedAt > fiveMinutesAgo { return }
         }
-        runIncrementalSync(path: rootPath.path)
+        runIncrementalSync(path: rootPath.path, trigger: .monitorReplayGap)
     }
 
     /// Background incremental sync — walks the filesystem and upserts only new/modified
@@ -337,7 +576,7 @@ final class AppState: ObservableObject {
     /// with existing viz data during the sync.
     /// - Parameter fullWalk: When true, uses iterative DFS without mtime pruning (for stale >7 day gaps).
     ///   When false (default), uses fast quickSync with mtime pruning.
-    private func runIncrementalSync(path: String, fullWalk: Bool = false) {
+    private func runIncrementalSync(path: String, fullWalk: Bool = false, trigger: SyncTrigger) {
         incrementalSyncTask?.cancel()
         guard let session = lastScanSession, let sessionId = session.id else { return }
         isSyncing = true
@@ -364,14 +603,78 @@ final class AppState: ObservableObject {
                 lastProgress: lastProgress
             )
             guard syncSuccess else {
+                if !Task.isCancelled {
+                    let failureMessage = lastProgress?.errorMessage
+                        ?? "DiskSight stopped before the refresh completed. Use Refresh Metrics to resync."
+                    if trigger.shouldAlertOnFailure {
+                        self.presentAlert(
+                            title: trigger.failureTitle,
+                            message: failureMessage,
+                            source: trigger.source
+                        )
+                    } else {
+                        self.recordActivity(
+                            level: .error,
+                            title: trigger.failureTitle,
+                            message: failureMessage,
+                            source: trigger.source
+                        )
+                    }
+                }
                 self.isSyncing = false
                 return
             }
-            try? await fileRepository.updateSessionStats(id: sessionId)
-            self.lastScanSession = try? fileRepository.latestCompletedScanSession()
+
+            do {
+                try await fileRepository.updateSessionStats(id: sessionId)
+            } catch {
+                let message = "DiskSight refreshed files, but could not update session stats. \(error.localizedDescription)"
+                if trigger.shouldAlertOnFailure {
+                    self.presentAlert(
+                        title: "Refresh Incomplete",
+                        message: message,
+                        level: .warning,
+                        source: trigger.source
+                    )
+                } else {
+                    self.recordActivity(
+                        level: .warning,
+                        title: "Refresh Incomplete",
+                        message: message,
+                        source: trigger.source
+                    )
+                }
+                self.isSyncing = false
+                return
+            }
+
+            do {
+                self.lastScanSession = try fileRepository.latestCompletedScanSession()
+            } catch {
+                let message = "DiskSight refreshed files, but could not reload the latest session state. \(error.localizedDescription)"
+                if trigger.shouldAlertOnFailure {
+                    self.presentAlert(
+                        title: "Refresh Incomplete",
+                        message: message,
+                        level: .warning,
+                        source: trigger.source
+                    )
+                } else {
+                    self.recordActivity(
+                        level: .warning,
+                        title: "Refresh Incomplete",
+                        message: message,
+                        source: trigger.source
+                    )
+                }
+                self.isSyncing = false
+                return
+            }
+
             self.invalidateCache()
             self.dataVersion += 1
             await self.refreshVisualizationData()
+            self.scheduleAutoGrowthRefresh()
             self.isSyncing = false
         }
     }
@@ -380,6 +683,8 @@ final class AppState: ObservableObject {
     /// the FSEvents stream died. Cache invalidation happens naturally via
     /// the FSEvents sink when real changes are detected.
     func handleBecameActive() {
+        guard !Self.isRunningTests else { return }
+
         // Only re-query if we have no session — avoids a redundant DB hit on every cmd-tab
         if lastScanSession == nil {
             if let session = try? fileRepository.latestCompletedScanSession() {
@@ -389,7 +694,7 @@ final class AppState: ObservableObject {
                 scheduleGrowthWarmup()
             }
         }
-        if let rootPath = lastScanSession?.rootPath, !(fsMonitor?.running ?? false) {
+        if monitoringEnabled, let rootPath = lastScanSession?.rootPath, !(fsMonitor?.running ?? false) {
             startMonitoring(path: rootPath)
         }
     }
@@ -412,13 +717,25 @@ final class AppState: ObservableObject {
             do {
                 try await CSVExporter.stream(from: fileRepository, sessionId: sessionId, to: url)
                 csvExportDone = true
+                recordActivity(
+                    level: .info,
+                    title: "Export Complete",
+                    message: "Saved a CSV export to \(url.path).",
+                    source: "Export",
+                    incrementUnread: false
+                )
                 // Clear success indicator after 3 seconds
                 Task {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     self.csvExportDone = false
                 }
             } catch {
-                // Silently fail — file write errors are rare after NSSavePanel
+                logger.error("CSV export failed: \(error.localizedDescription, privacy: .public)")
+                presentAlert(
+                    title: "Export Failed",
+                    message: "DiskSight could not write the CSV export. \(error.localizedDescription)",
+                    source: "Export"
+                )
             }
             isExportingCSV = false
         }
@@ -430,17 +747,8 @@ final class AppState: ObservableObject {
         guard overviewFileCount == nil else { return }
         do {
             if let session = lastScanSession, let sessionId = session.id {
-                // Use pre-computed session stats — avoids full-table scan on cold launch
-                if let count = session.fileCount {
-                    overviewFileCount = count
-                } else {
-                    overviewFileCount = try fileRepository.fileCount(sessionId: sessionId)
-                }
-                if let indexed = session.indexedSize {
-                    overviewTotalSize = indexed
-                } else {
-                    overviewTotalSize = try fileRepository.totalSize(sessionId: sessionId)
-                }
+                overviewFileCount = try fileRepository.fileCount(sessionId: sessionId)
+                overviewTotalSize = try fileRepository.totalSize(sessionId: sessionId)
                 if let root = try fileRepository.rootNodeConcurrent() {
                     overviewTopFolders = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: root.path))
                         .filter { $0.isDirectory }
@@ -454,10 +762,23 @@ final class AppState: ObservableObject {
                 }
             }
         } catch {
+            recordActivity(
+                level: .warning,
+                title: "Could Not Load Overview Data",
+                message: error.localizedDescription,
+                source: "Overview"
+            )
             #if DEBUG
             print("[AppState] loadOverviewData error: \(error)")
             #endif
         }
+    }
+
+    func refreshOverviewData() async {
+        overviewFileCount = nil
+        overviewTotalSize = nil
+        overviewTopFolders = nil
+        await loadOverviewData()
     }
 
     func loadVisualizationRoot() async {
@@ -473,6 +794,12 @@ final class AppState: ObservableObject {
                 vizBreadcrumbs = []
             }
         } catch {
+            recordActivity(
+                level: .warning,
+                title: "Could Not Load Visualization",
+                message: error.localizedDescription,
+                source: "Visualization"
+            )
             #if DEBUG
             print("[AppState] loadVisualizationRoot error: \(error)")
             #endif
@@ -497,6 +824,12 @@ final class AppState: ObservableObject {
             vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: node.path))
         } catch {
             vizChildNodes = []
+            recordActivity(
+                level: .warning,
+                title: "Could Not Open Folder View",
+                message: error.localizedDescription,
+                source: "Visualization"
+            )
         }
     }
 
@@ -514,6 +847,12 @@ final class AppState: ObservableObject {
             vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: crumb.path))
         } catch {
             vizChildNodes = []
+            recordActivity(
+                level: .warning,
+                title: "Could Not Open Folder View",
+                message: error.localizedDescription,
+                source: "Visualization"
+            )
         }
     }
 
@@ -571,6 +910,12 @@ final class AppState: ObservableObject {
             vizChildNodes = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: targetPath))
         } catch {
             vizChildNodes = []
+            recordActivity(
+                level: .warning,
+                title: "Could Not Open Folder View",
+                message: error.localizedDescription,
+                source: "Visualization"
+            )
         }
     }
 
@@ -586,31 +931,56 @@ final class AppState: ObservableObject {
         if staleFiles != nil && staleThreshold == threshold { return }
         staleThreshold = threshold
         let finder = StaleFinder(repository: fileRepository)
-        staleFiles = (try? await finder.findStaleFiles(threshold: threshold)) ?? []
+        do {
+            staleFiles = try await finder.findStaleFiles(threshold: threshold)
+        } catch {
+            staleFiles = []
+            recordActivity(
+                level: .warning,
+                title: "Could Not Load Stale Files",
+                message: error.localizedDescription,
+                source: "Stale Files"
+            )
+        }
     }
 
     func loadCacheData() async {
         guard detectedCaches == nil else { return }
         let detector = CacheDetector(repository: fileRepository)
-        detectedCaches = (try? await detector.detectCaches()) ?? []
+        do {
+            detectedCaches = try await detector.detectCaches()
+        } catch {
+            detectedCaches = []
+            recordActivity(
+                level: .warning,
+                title: "Could Not Load Cache Data",
+                message: error.localizedDescription,
+                source: "Cache"
+            )
+        }
     }
 
     /// Synchronous period switch — instant for in-memory or DB cache hits, async SQL as last resort.
     func switchGrowthPeriod(to period: GrowthPeriod) {
+        let invalidated = ensureGrowthCacheFreshForCurrentDataVersion()
+        let requiresLiveRefresh = invalidated || growthDisplayedDataVersion != dataVersion
         growthPeriod = period
 
         // 1. In-memory cache hit → instant
-        if let cached = growthCache[period] {
+        if !requiresLiveRefresh, let cached = growthCache[period] {
             growthFolders = visibleGrowthFolders(cached)
+            growthDisplayedDataVersion = dataVersion
             growthLoadingPeriod = nil
             return
         }
 
         // 2. DB cache hit (nonisolated, bypasses actor) → instant
-        if let sessionId = lastScanSession?.id,
+        if !requiresLiveRefresh,
+           let sessionId = lastScanSession?.id,
            let persisted = fileRepository.cachedGrowthFoldersConcurrent(sessionId: sessionId, period: period) {
             growthCache[period] = persisted
             growthFolders = visibleGrowthFolders(persisted)
+            growthDisplayedDataVersion = dataVersion
             growthLoadingPeriod = nil
             return
         }
@@ -619,9 +989,10 @@ final class AppState: ObservableObject {
         growthLoadingPeriod = period
         growthFolders = nil
         Task {
-            let results = await loadGrowthPeriod(period, forceRefresh: false)
+            let results = await loadGrowthPeriod(period, forceRefresh: requiresLiveRefresh)
             if growthPeriod == period {
                 growthFolders = visibleGrowthFolders(results)
+                growthDisplayedDataVersion = dataVersion
             }
             if growthLoadingPeriod == period {
                 growthLoadingPeriod = nil
@@ -631,28 +1002,36 @@ final class AppState: ObservableObject {
 
     /// Initial load — for .task on first appearance. Tries caches before expensive SQL.
     func loadGrowthData() async {
-        guard growthFolders == nil else { return }
+        let invalidated = ensureGrowthCacheFreshForCurrentDataVersion()
         let period = growthPeriod
+        let requiresLiveRefresh = invalidated || growthDisplayedDataVersion != dataVersion
+
+        guard growthFolders == nil || requiresLiveRefresh else { return }
 
         // Try in-memory cache
-        if let cached = growthCache[period] {
+        if !requiresLiveRefresh, let cached = growthCache[period] {
             growthFolders = visibleGrowthFolders(cached)
+            growthDisplayedDataVersion = dataVersion
             return
         }
 
         // Try DB cache (nonisolated, fast)
-        if let sessionId = lastScanSession?.id,
+        if !requiresLiveRefresh,
+           let sessionId = lastScanSession?.id,
            let persisted = fileRepository.cachedGrowthFoldersConcurrent(sessionId: sessionId, period: period) {
             growthCache[period] = persisted
             growthFolders = visibleGrowthFolders(persisted)
+            growthDisplayedDataVersion = dataVersion
             return
         }
 
         // Full miss — async SQL
         growthLoadingPeriod = period
-        let results = await loadGrowthPeriod(period, forceRefresh: false)
+        growthFolders = nil
+        let results = await loadGrowthPeriod(period, forceRefresh: requiresLiveRefresh)
         if growthPeriod == period {
             growthFolders = visibleGrowthFolders(results)
+            growthDisplayedDataVersion = dataVersion
         }
         if growthLoadingPeriod == period {
             growthLoadingPeriod = nil
@@ -670,6 +1049,7 @@ final class AppState: ObservableObject {
         let results = await loadGrowthPeriod(period, forceRefresh: true)
         if growthPeriod == period {
             growthFolders = visibleGrowthFolders(results)
+            growthDisplayedDataVersion = dataVersion
         }
         if growthLoadingPeriod == period {
             growthLoadingPeriod = nil
@@ -687,6 +1067,12 @@ final class AppState: ObservableObject {
             cleanupRecommendations = records.map { $0.toRecommendation() }
             cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
         } catch {
+            recordActivity(
+                level: .warning,
+                title: "Could Not Load Cleanup Recommendations",
+                message: error.localizedDescription,
+                source: "Smart Cleanup"
+            )
             #if DEBUG
             print("[AppState] loadSmartCleanup error: \(error)")
             #endif
@@ -707,11 +1093,12 @@ final class AppState: ObservableObject {
             let service = SmartCleanupService(
                 classifier: FileClassifier(),
                 repository: fileRepository,
-                ollamaClient: useLLM ? OllamaClient() : nil
+                llmService: useLLM ? OllamaClient(baseURL: ollamaBaseURL) : nil
             )
 
             var allRecs: [CleanupRecommendation] = []
-            let stream = await service.analyze(sessionId: sessionId, useLLM: useLLM)
+            let llmModel = useLLM ? selectedOllamaModel : nil
+            let stream = await service.analyze(sessionId: sessionId, llmModel: llmModel)
             for await (progress, recs) in stream {
                 cleanupProgress = progress
                 // The service yields batches, then optionally a full enhanced set at the end.
@@ -737,6 +1124,12 @@ final class AppState: ObservableObject {
             cleanupRecommendations = allRecs
             cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
         } catch {
+            logger.error("Smart cleanup failed: \(error.localizedDescription, privacy: .public)")
+            presentAlert(
+                title: "Smart Cleanup Failed",
+                message: "DiskSight could not finish the cleanup analysis. \(error.localizedDescription)",
+                source: "Smart Cleanup"
+            )
             #if DEBUG
             print("[AppState] runSmartCleanup error: \(error)")
             #endif
@@ -747,13 +1140,13 @@ final class AppState: ObservableObject {
     }
 
     func checkOllamaStatus() async {
-        let client = OllamaClient()
+        let client = OllamaClient(baseURL: ollamaBaseURL)
         let status = await client.checkAvailability()
         switch status {
         case .available(let models):
             isOllamaAvailable = true
             ollamaModels = models
-            if selectedOllamaModel.isEmpty, let first = models.first {
+            if !models.contains(selectedOllamaModel), let first = models.first {
                 selectedOllamaModel = first
             }
         case .unavailable:
@@ -763,39 +1156,215 @@ final class AppState: ObservableObject {
     }
 
     func trashCleanupFile(at path: String) async {
-        let url = URL(fileURLWithPath: path)
-        try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-        try? await fileRepository.deleteFile(path: path)
+        let result = await trashIndexedPaths([path], actionName: "processing cleanup selections")
+        guard result.deletedCount > 0 else { return }
 
         // Remove from local recommendations
         cleanupRecommendations?.removeAll { $0.filePath == path }
-        if let session = lastScanSession, let sessionId = session.id {
-            try? await fileRepository.updateSessionStats(id: sessionId)
-            self.lastScanSession = try? fileRepository.latestCompletedScanSession()
-            cleanupSummary = try? await fileRepository.recommendationSummary(forSession: sessionId)
-        }
-        invalidateCache()
-        await refreshVisualizationData()
+        await refreshAfterIndexedFileMutation(preserveCleanup: true)
     }
 
     func trashAllSafeCleanup() async {
         guard let recs = cleanupRecommendations?.filter({ $0.confidence == .safe }) else { return }
-        for rec in recs {
-            let url = URL(fileURLWithPath: rec.filePath)
-            try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-            try? await fileRepository.deleteFile(path: rec.filePath)
-        }
+        let result = await trashIndexedPaths(recs.map(\.filePath), actionName: "processing cleanup selections")
+        guard result.deletedCount > 0 else { return }
         cleanupRecommendations?.removeAll { $0.confidence == .safe }
-        if let session = lastScanSession, let sessionId = session.id {
-            try? await fileRepository.updateSessionStats(id: sessionId)
-            self.lastScanSession = try? fileRepository.latestCompletedScanSession()
-            cleanupSummary = try? await fileRepository.recommendationSummary(forSession: sessionId)
-        }
-        invalidateCache()
-        await refreshVisualizationData()
+        await refreshAfterIndexedFileMutation(preserveCleanup: true)
     }
 
-    func invalidateCache() {
+    func presentAlert(
+        title: String,
+        message: String,
+        level: AppActivityLevel = .error,
+        source: String = "Operations",
+        logToActivity: Bool = true
+    ) {
+        activeAlert = AppAlertInfo(title: title, message: message)
+        if logToActivity {
+            recordActivity(level: level, title: title, message: message, source: source)
+        }
+    }
+
+    func recordActivity(_ operation: AppOperationMessage, incrementUnread: Bool = true) {
+        recordActivity(
+            level: operation.level,
+            title: operation.title,
+            message: operation.message,
+            source: operation.source,
+            incrementUnread: incrementUnread
+        )
+    }
+
+    func recordActivity(
+        level: AppActivityLevel,
+        title: String,
+        message: String,
+        source: String,
+        incrementUnread: Bool = true
+    ) {
+        let normalizedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let now = Date()
+
+        if !activityLog.isEmpty,
+           activityLog[0].level == level,
+           activityLog[0].title == title,
+           activityLog[0].message == normalizedMessage,
+           activityLog[0].source == source {
+            activityLog[0].timestamp = now
+            activityLog[0].occurrenceCount += 1
+        } else {
+            activityLog.insert(
+                AppActivityEntry(
+                    level: level,
+                    title: title,
+                    message: normalizedMessage,
+                    source: source,
+                    timestamp: now,
+                    occurrenceCount: 1
+                ),
+                at: 0
+            )
+            if activityLog.count > maxActivityLogEntries {
+                activityLog.removeLast(activityLog.count - maxActivityLogEntries)
+            }
+        }
+
+        if incrementUnread && !showActivityLog && level != .info {
+            unreadActivityCount += 1
+        }
+    }
+
+    func clearActivityLog() {
+        activityLog.removeAll()
+        unreadActivityCount = 0
+    }
+
+    func trashIndexedPaths(_ paths: [String], actionName: String) async -> TrashOperationResult {
+        let uniquePaths = Array(NSOrderedSet(array: paths)) as? [String] ?? paths
+        guard !uniquePaths.isEmpty else {
+            return TrashOperationResult(
+                requestedCount: 0,
+                removedFromDiskCount: 0,
+                removedMissingCount: 0,
+                deletedPaths: [],
+                failures: []
+            )
+        }
+
+        var removedFromDiskPaths: [String] = []
+        var removedMissingPaths: [String] = []
+        var failures: [TrashFailure] = []
+
+        for path in uniquePaths {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: path) {
+                do {
+                    try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                    try await fileRepository.deleteFile(path: path)
+                    removedFromDiskPaths.append(path)
+                } catch {
+                    logger.error("Failed to trash \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    failures.append(TrashFailure(path: path, reason: error.localizedDescription))
+                }
+            } else {
+                do {
+                    try await fileRepository.deleteFile(path: path)
+                    removedMissingPaths.append(path)
+                } catch {
+                    logger.error("Failed to remove missing index entry \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    failures.append(TrashFailure(path: path, reason: error.localizedDescription))
+                }
+            }
+        }
+
+        let deletedPaths = removedFromDiskPaths + removedMissingPaths
+        if !deletedPaths.isEmpty {
+            do {
+                try await fileRepository.deleteRecommendations(forFilePaths: deletedPaths)
+                try await fileRepository.updateAncestorSizes(forPaths: Set(deletedPaths))
+                try await fileRepository.refreshRootDirectorySize()
+            } catch {
+                logger.error("Failed to refresh sizes after trashing files: \(error.localizedDescription, privacy: .public)")
+                presentAlert(
+                    title: "Index Refresh Needed",
+                    message: "DiskSight moved files to Trash, but could not fully refresh its index. Use Refresh Metrics to resync.",
+                    level: .warning,
+                    source: "Index"
+                )
+            }
+        }
+
+        if !failures.isEmpty {
+            let names = failures
+                .prefix(3)
+                .map { URL(fileURLWithPath: $0.path).lastPathComponent }
+                .joined(separator: ", ")
+            let suffix = failures.count > 3 ? " and \(failures.count - 3) more" : ""
+            let successMessage: String
+            if deletedPaths.isEmpty {
+                successMessage = ""
+            } else {
+                successMessage = "DiskSight removed \(deletedPaths.count) item(s) while \(actionName). "
+            }
+            presentAlert(
+                title: "Some Items Could Not Be Removed",
+                message: "\(successMessage)Failed items: \(names)\(suffix).",
+                level: .warning,
+                source: "Cleanup"
+            )
+        }
+
+        return TrashOperationResult(
+            requestedCount: uniquePaths.count,
+            removedFromDiskCount: removedFromDiskPaths.count,
+            removedMissingCount: removedMissingPaths.count,
+            deletedPaths: deletedPaths,
+            failures: failures
+        )
+    }
+
+    func refreshAfterIndexedFileMutation(
+        preserveDuplicateGroups: Bool = false,
+        preserveStaleFiles: Bool = false,
+        preserveDetectedCaches: Bool = false,
+        preserveCleanup: Bool = false
+    ) async {
+        invalidateCache(
+            preserveDuplicateGroups: preserveDuplicateGroups,
+            preserveStaleFiles: preserveStaleFiles,
+            preserveDetectedCaches: preserveDetectedCaches,
+            preserveCleanup: preserveCleanup
+        )
+
+        if let session = lastScanSession, let sessionId = session.id {
+            do {
+                try await fileRepository.updateSessionStats(id: sessionId)
+                self.lastScanSession = try fileRepository.latestCompletedScanSession()
+                if preserveCleanup {
+                    cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
+                }
+            } catch {
+                logger.error("Failed to refresh session stats after mutation: \(error.localizedDescription, privacy: .public)")
+                presentAlert(
+                    title: "Index Refresh Needed",
+                    message: "DiskSight updated the files but could not refresh session stats. Use Refresh Metrics to resync.",
+                    level: .warning,
+                    source: "Index"
+                )
+            }
+        }
+
+        dataVersion += 1
+        await refreshVisualizationData()
+        scheduleAutoGrowthRefresh()
+    }
+
+    func invalidateCache(
+        preserveDuplicateGroups: Bool = false,
+        preserveStaleFiles: Bool = false,
+        preserveDetectedCaches: Bool = false,
+        preserveCleanup: Bool = false
+    ) {
         overviewFileCount = nil
         overviewTotalSize = nil
         overviewTopFolders = nil
@@ -805,11 +1374,20 @@ final class AppState: ObservableObject {
         // vizCurrentPath and vizBreadcrumbs are navigation state, not cached data.
         // growthFolders is NOT cleared here for the same reason — refreshGrowthData()
         // replaces data atomically. Cleared explicitly in startScan() for new scans.
-        duplicateGroups = nil
-        staleFiles = nil
-        detectedCaches = nil
-        cleanupRecommendations = nil
-        cleanupSummary = nil
+        growthDisplayedDataVersion = -1
+        if !preserveDuplicateGroups {
+            duplicateGroups = nil
+        }
+        if !preserveStaleFiles {
+            staleFiles = nil
+        }
+        if !preserveDetectedCaches {
+            detectedCaches = nil
+        }
+        if !preserveCleanup {
+            cleanupRecommendations = nil
+            cleanupSummary = nil
+        }
     }
 
     /// Reload viz data in-place without clearing first (prevents blank frame flicker)
@@ -825,7 +1403,14 @@ final class AppState: ObservableObject {
                     vizBreadcrumbs = []
                 }
             }
-        } catch {}
+        } catch {
+            recordActivity(
+                level: .warning,
+                title: "Visualization Refresh Failed",
+                message: error.localizedDescription,
+                source: "Visualization"
+            )
+        }
     }
 
     private func loadGrowthPeriod(_ period: GrowthPeriod, forceRefresh: Bool) async -> [FolderGrowth] {
@@ -843,7 +1428,7 @@ final class AppState: ObservableObject {
 
         let cutoff = period.cutoffDate.timeIntervalSince1970
         let excludePrefix = hideExternalDrives ? "/Volumes/" : nil
-        let results = (try? await fileRepository.recentlyGrowingFolders(createdAfter: cutoff, excludePrefix: excludePrefix)) ?? []
+        let results = (try? fileRepository.recentlyGrowingFoldersConcurrent(createdAfter: cutoff, excludePrefix: excludePrefix)) ?? []
         growthCache[period] = results
         if let sessionId = lastScanSession?.id {
             try? await fileRepository.upsertGrowthCache(sessionId: sessionId, period: period, folders: results)
@@ -863,6 +1448,7 @@ final class AppState: ObservableObject {
             let selectedResults = await self.loadGrowthPeriod(selectedPeriod, forceRefresh: true)
             if self.growthPeriod == selectedPeriod && self.growthFolders == nil {
                 self.growthFolders = self.visibleGrowthFolders(selectedResults)
+                self.growthDisplayedDataVersion = self.dataVersion
             }
 
             for period in GrowthPeriod.allCases where period != selectedPeriod {
@@ -870,6 +1456,32 @@ final class AppState: ObservableObject {
                 _ = await self.loadGrowthPeriod(period, forceRefresh: true)
             }
         }
+    }
+
+    private func scheduleAutoGrowthRefresh() {
+        guard selectedSection == .growth else {
+            growthRefreshQueued = true
+            return
+        }
+
+        growthRefreshQueued = true
+        guard growthAutoRefreshTask == nil else { return }
+
+        growthAutoRefreshTask = Task {
+            while growthRefreshQueued {
+                growthRefreshQueued = false
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                guard !Task.isCancelled else { return }
+                await refreshGrowthData()
+            }
+            growthAutoRefreshTask = nil
+        }
+    }
+
+    private func cancelAutoGrowthRefresh() {
+        growthRefreshQueued = false
+        growthAutoRefreshTask?.cancel()
+        growthAutoRefreshTask = nil
     }
 
     private func scheduleCacheWarmup() {
@@ -894,7 +1506,9 @@ final class AppState: ObservableObject {
             self.scanRootPath = URL(fileURLWithPath: session.rootPath)
             if session.completedAt != nil {
                 self.scanState = .completed
-                startMonitoring(path: session.rootPath)
+                if monitoringEnabled {
+                    startMonitoring(path: session.rootPath)
+                }
             }
         }
     }
@@ -908,7 +1522,14 @@ final class AppState: ObservableObject {
                     .map { $0 }
                 overviewTopFolders = top
             }
-        } catch {}
+        } catch {
+            recordActivity(
+                level: .warning,
+                title: "Filtered Refresh Failed",
+                message: error.localizedDescription,
+                source: "Overview"
+            )
+        }
 
         await refreshVisualizationData()
 
@@ -917,11 +1538,14 @@ final class AppState: ObservableObject {
         await refreshGrowthData()
     }
 
-    private func ensureGrowthCacheFreshForCurrentDataVersion() {
+    @discardableResult
+    private func ensureGrowthCacheFreshForCurrentDataVersion() -> Bool {
         if growthCacheDataVersion != dataVersion {
             growthCache = [:]
             growthCacheDataVersion = dataVersion
+            return true
         }
+        return false
     }
 
     func shouldIncludePath(_ path: String) -> Bool {

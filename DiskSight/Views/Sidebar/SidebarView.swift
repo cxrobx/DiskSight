@@ -21,6 +21,7 @@ struct SidebarView: View {
 
             Section {
                 scanControlView
+                activityLogButton
             }
         }
         .listStyle(.sidebar)
@@ -72,10 +73,31 @@ struct SidebarView: View {
                 Label("Scan Complete", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.caption)
+                if appState.isSyncing {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Refreshing live metrics...")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if appState.isMonitoring {
+                    Label("Live monitoring active", systemImage: "dot.radiowaves.left.and.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    appState.refreshMetrics()
+                } label: {
+                    Label(appState.isSyncing ? "Refreshing..." : "Refresh Now", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(!appState.canRefreshMetrics || appState.isSyncing)
                 Button {
                     selectAndScan()
                 } label: {
-                    Label("Rescan...", systemImage: "arrow.clockwise")
+                    Label("Scan Folder...", systemImage: "folder.badge.gearshape")
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
@@ -113,5 +135,25 @@ struct SidebarView: View {
             appState.scanRootPath = url
             appState.startScan(at: url)
         }
+    }
+
+    private var activityLogButton: some View {
+        Button {
+            appState.showActivityLog = true
+        } label: {
+            HStack {
+                Label("Activity Log", systemImage: "list.bullet.rectangle")
+                Spacer()
+                if appState.unreadActivityCount > 0 {
+                    Text(appState.unreadActivityCount.formatted())
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(.red))
+                }
+            }
+        }
+        .buttonStyle(.borderless)
     }
 }

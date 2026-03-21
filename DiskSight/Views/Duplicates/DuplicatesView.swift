@@ -162,30 +162,41 @@ struct DuplicatesView: View {
         let finder = DuplicateFinder(repository: appState.fileRepository)
 
         scanTask = Task {
-            for await p in finder.findDuplicates() {
+            let stream = await finder.findDuplicates()
+            for await p in stream {
                 self.progress = p
             }
 
             do {
                 appState.duplicateGroups = try await finder.getDuplicateGroups()
-            } catch {}
+            } catch {
+                appState.presentAlert(
+                    title: "Duplicate Scan Failed",
+                    message: "DiskSight could not load duplicate groups. \(error.localizedDescription)"
+                )
+            }
             self.isScanning = false
         }
     }
 
     private func trashFiles(_ files: [FileNode]) {
         Task {
-            for file in files {
-                let url = URL(fileURLWithPath: file.path)
-                do {
-                    try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                    try await appState.fileRepository.deleteFile(path: file.path)
-                } catch {}
-            }
+            let result = await appState.trashIndexedPaths(
+                files.map(\.path),
+                actionName: "removing duplicate files"
+            )
+            guard result.deletedCount > 0 else { return }
 
-            appState.invalidateCache()
+            await appState.refreshAfterIndexedFileMutation()
             let finder = DuplicateFinder(repository: appState.fileRepository)
-            appState.duplicateGroups = (try? await finder.getDuplicateGroups()) ?? []
+            do {
+                appState.duplicateGroups = try await finder.getDuplicateGroups()
+            } catch {
+                appState.presentAlert(
+                    title: "Duplicate Refresh Failed",
+                    message: "DiskSight moved the files, but could not refresh duplicate groups. \(error.localizedDescription)"
+                )
+            }
         }
     }
 }

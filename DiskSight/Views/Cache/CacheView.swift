@@ -197,14 +197,19 @@ struct CacheView: View {
         Task {
             isCleaning = true
             let detector = CacheDetector(repository: appState.fileRepository)
-            let paths = (try? await detector.allMatchingPaths(for: cache.pattern)) ?? []
-            for path in paths {
-                let url = URL(fileURLWithPath: path)
-                try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                try? await appState.fileRepository.deleteFile(path: path)
+            do {
+                let paths = try await detector.allMatchingPaths(for: cache.pattern)
+                let result = await appState.trashIndexedPaths(paths, actionName: "cleaning caches")
+                if result.deletedCount > 0 {
+                    await appState.refreshAfterIndexedFileMutation()
+                    await detectCaches()
+                }
+            } catch {
+                appState.presentAlert(
+                    title: "Cache Cleanup Failed",
+                    message: "DiskSight could not resolve cache files to clean. \(error.localizedDescription)"
+                )
             }
-            appState.invalidateCache()
-            await detectCaches()
             isCleaning = false
         }
     }
@@ -214,17 +219,26 @@ struct CacheView: View {
             isCleaning = true
             let detector = CacheDetector(repository: appState.fileRepository)
             var uniquePaths = Set<String>()
-            for cache in safeCaches {
-                let paths = (try? await detector.allMatchingPaths(for: cache.pattern)) ?? []
-                uniquePaths.formUnion(paths)
+            do {
+                for cache in safeCaches {
+                    let paths = try await detector.allMatchingPaths(for: cache.pattern)
+                    uniquePaths.formUnion(paths)
+                }
+
+                let result = await appState.trashIndexedPaths(
+                    Array(uniquePaths),
+                    actionName: "cleaning caches"
+                )
+                if result.deletedCount > 0 {
+                    await appState.refreshAfterIndexedFileMutation()
+                    await detectCaches()
+                }
+            } catch {
+                appState.presentAlert(
+                    title: "Cache Cleanup Failed",
+                    message: "DiskSight could not resolve cache files to clean. \(error.localizedDescription)"
+                )
             }
-            for path in uniquePaths {
-                let url = URL(fileURLWithPath: path)
-                try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                try? await appState.fileRepository.deleteFile(path: path)
-            }
-            appState.invalidateCache()
-            await detectCaches()
             isCleaning = false
         }
     }

@@ -14,9 +14,40 @@ struct CleanupRecommendation: Identifiable {
     let signals: [CleanupSignal]
     let llmEnhanced: Bool
     let scanSessionId: Int64
+    let llmRaisedConfidence: Bool
 
     var accessedAt: Double?
     var modifiedAt: Double?
+
+    init(
+        id: String,
+        filePath: String,
+        fileName: String,
+        fileSize: Int64,
+        category: FileCategoryType,
+        confidence: DeletionConfidence,
+        explanation: String,
+        signals: [CleanupSignal],
+        llmEnhanced: Bool,
+        scanSessionId: Int64,
+        llmRaisedConfidence: Bool = false,
+        accessedAt: Double? = nil,
+        modifiedAt: Double? = nil
+    ) {
+        self.id = id
+        self.filePath = filePath
+        self.fileName = fileName
+        self.fileSize = fileSize
+        self.category = category
+        self.confidence = confidence
+        self.explanation = explanation
+        self.signals = signals
+        self.llmEnhanced = llmEnhanced
+        self.scanSessionId = scanSessionId
+        self.llmRaisedConfidence = llmRaisedConfidence
+        self.accessedAt = accessedAt
+        self.modifiedAt = modifiedAt
+    }
 }
 
 // MARK: - GRDB-Persistable Record
@@ -73,7 +104,8 @@ struct CleanupRecommendationRecord: Codable, FetchableRecord, PersistableRecord,
             explanation: explanation,
             signals: decodedSignals,
             llmEnhanced: llmEnhanced,
-            scanSessionId: scanSessionId
+            scanSessionId: scanSessionId,
+            llmRaisedConfidence: false
         )
     }
 

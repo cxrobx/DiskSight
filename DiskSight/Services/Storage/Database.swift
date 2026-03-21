@@ -1,17 +1,120 @@
 import Foundation
 import GRDB
+import OSLog
+
+struct DatabaseStartupIssue: Sendable {
+    let title: String
+    let message: String
+}
 
 final class Database: Sendable {
-    static let shared = Database()
+    private static let logger = Logger(subsystem: "com.disksight.app", category: "Database")
+    static let shared = Database.makeShared()
 
     let dbPool: DatabasePool
+    let databaseURL: URL
+    let startupIssue: DatabaseStartupIssue?
 
-    private init() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dbDir = appSupport.appendingPathComponent("DiskSight", isDirectory: true)
-        try! FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
-        let dbPath = dbDir.appendingPathComponent("disksight.sqlite").path
+    init(databaseURL: URL) throws {
+        try Self.ensureParentDirectory(for: databaseURL)
+        let dbPool = try Self.makeDatabasePool(at: databaseURL)
+        try Self.migrator.migrate(dbPool)
 
+        self.dbPool = dbPool
+        self.databaseURL = databaseURL
+        self.startupIssue = nil
+    }
+
+    private init(databaseURL: URL, dbPool: DatabasePool, startupIssue: DatabaseStartupIssue?) {
+        self.dbPool = dbPool
+        self.databaseURL = databaseURL
+        self.startupIssue = startupIssue
+    }
+
+    private static func makeShared() -> Database {
+        do {
+            return try Database(databaseURL: defaultDatabaseURL())
+        } catch {
+            logger.error("Primary database startup failed: \(error.localizedDescription, privacy: .public)")
+        }
+
+        let databaseURL: URL
+        do {
+            databaseURL = try defaultDatabaseURL()
+        } catch {
+            return fallbackTemporaryDatabase(
+                issue: DatabaseStartupIssue(
+                    title: "Disk Index Reset",
+                    message: "DiskSight could not access its Application Support database location. A temporary empty index was created for this launch."
+                ),
+                underlyingError: error
+            )
+        }
+
+        do {
+            let backupDirectory = try backupCorruptedDatabaseArtifacts(at: databaseURL)
+            var recovered = try Database(databaseURL: databaseURL)
+            recovered = Database(
+                databaseURL: recovered.databaseURL,
+                dbPool: recovered.dbPool,
+                startupIssue: DatabaseStartupIssue(
+                    title: "Disk Index Reset",
+                    message: "DiskSight reset its local index after a startup failure. Run a fresh scan to rebuild results. Backup: \(backupDirectory.path)"
+                )
+            )
+            logger.error("Recovered by resetting the database at \(databaseURL.path, privacy: .public)")
+            return recovered
+        } catch {
+            logger.error("Database reset recovery failed: \(error.localizedDescription, privacy: .public)")
+            return fallbackTemporaryDatabase(
+                issue: DatabaseStartupIssue(
+                    title: "Disk Index Recovery Failed",
+                    message: "DiskSight could not reopen its local index. A temporary empty index was created for this launch. Run a fresh scan after restarting."
+                ),
+                underlyingError: error
+            )
+        }
+    }
+
+    private static func fallbackTemporaryDatabase(
+        issue: DatabaseStartupIssue,
+        underlyingError: Error
+    ) -> Database {
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiskSight-Recovery-\(UUID().uuidString)")
+            .appendingPathExtension("sqlite")
+
+        do {
+            let recovered = try Database(databaseURL: temporaryURL)
+            logger.error("Using temporary recovery database at \(temporaryURL.path, privacy: .public)")
+            return Database(
+                databaseURL: recovered.databaseURL,
+                dbPool: recovered.dbPool,
+                startupIssue: issue
+            )
+        } catch {
+            logger.fault("Temporary database fallback failed: \(error.localizedDescription, privacy: .public)")
+            preconditionFailure("Unable to initialize DiskSight database: \(underlyingError.localizedDescription)")
+        }
+    }
+
+    private static func defaultDatabaseURL() throws -> URL {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return appSupport
+            .appendingPathComponent("DiskSight", isDirectory: true)
+            .appendingPathComponent("disksight.sqlite")
+    }
+
+    private static func ensureParentDirectory(for databaseURL: URL) throws {
+        try FileManager.default.createDirectory(
+            at: databaseURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+    }
+
+    private static func makeDatabasePool(at databaseURL: URL) throws -> DatabasePool {
         var config = Configuration()
         config.prepareDatabase { db in
             // Limit WAL file growth — checkpoint every 1000 pages (~4MB)
@@ -23,11 +126,39 @@ final class Database: Sendable {
             #endif
         }
 
-        dbPool = try! DatabasePool(path: dbPath, configuration: config)
-        try! migrator.migrate(dbPool)
+        return try DatabasePool(path: databaseURL.path, configuration: config)
     }
 
-    private var migrator: DatabaseMigrator {
+    private static func backupCorruptedDatabaseArtifacts(at databaseURL: URL) throws -> URL {
+        let fm = FileManager.default
+        let artifactPaths = [
+            databaseURL.path,
+            databaseURL.path + "-wal",
+            databaseURL.path + "-shm"
+        ]
+
+        let existingArtifacts = artifactPaths.filter { fm.fileExists(atPath: $0) }
+        guard !existingArtifacts.isEmpty else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        let backupDirectory = databaseURL.deletingLastPathComponent()
+            .appendingPathComponent("Recovered-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+        try fm.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+
+        for artifact in existingArtifacts {
+            let sourceURL = URL(fileURLWithPath: artifact)
+            let destinationURL = backupDirectory.appendingPathComponent(sourceURL.lastPathComponent)
+            if fm.fileExists(atPath: destinationURL.path) {
+                try fm.removeItem(at: destinationURL)
+            }
+            try fm.moveItem(at: sourceURL, to: destinationURL)
+        }
+
+        return backupDirectory
+    }
+
+    private static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
         migrator.registerMigration("v1_initial") { db in
@@ -143,6 +274,14 @@ final class Database: Sendable {
             try db.alter(table: "growth_cache") { t in
                 t.add(column: "cache_version", .integer).notNull().defaults(to: 1)
             }
+        }
+
+        migrator.registerMigration("v9_growth_covering_index") { db in
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_files_growth
+                ON files (created_at, parent_path, size)
+                WHERE is_directory = 0 AND created_at IS NOT NULL
+                """)
         }
 
         return migrator

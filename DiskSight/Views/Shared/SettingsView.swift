@@ -23,11 +23,7 @@ struct SettingsView: View {
 
     @AppStorage("visualizationMode") private var defaultVizMode: VisualizationMode = .treemap
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
-    @AppStorage("monitoringEnabled") private var monitoringEnabled = true
-    @AppStorage("staleThreshold") private var staleThreshold: String = StaleThreshold.oneYear.rawValue
     @AppStorage("llmEnabled") private var llmEnabled = false
-    @AppStorage("ollamaURL") private var ollamaURL = "http://localhost:11434"
-    @AppStorage("ollamaModel") private var ollamaModel = ""
     @State private var ollamaTestResult: String?
     @State private var isTesting = false
 
@@ -51,16 +47,16 @@ struct SettingsView: View {
             }
 
             Section("Monitoring") {
-                Toggle("Enable real-time monitoring", isOn: $monitoringEnabled)
+                Toggle("Enable real-time monitoring", isOn: $appState.monitoringEnabled)
                 Text("When enabled, DiskSight watches for file changes after a scan")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Stale Files") {
-                Picker("Default threshold", selection: $staleThreshold) {
+                Picker("Default threshold", selection: $appState.staleThreshold) {
                     ForEach(StaleThreshold.allCases) { threshold in
-                        Text(threshold.rawValue).tag(threshold.rawValue)
+                        Text(threshold.rawValue).tag(threshold)
                     }
                 }
             }
@@ -72,10 +68,10 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
 
                 if llmEnabled {
-                    TextField("Ollama URL", text: $ollamaURL)
+                    TextField("Ollama URL", text: $appState.ollamaBaseURL)
                         .textFieldStyle(.roundedBorder)
 
-                    TextField("Model name", text: $ollamaModel)
+                    TextField("Model name", text: $appState.selectedOllamaModel)
                         .textFieldStyle(.roundedBorder)
 
                     HStack {
@@ -128,13 +124,20 @@ struct SettingsView: View {
         isTesting = true
         ollamaTestResult = nil
         Task {
-            let client = OllamaClient(baseURL: ollamaURL)
+            let client = OllamaClient(baseURL: appState.ollamaBaseURL)
             let status = await client.checkAvailability()
             await MainActor.run {
                 switch status {
                 case .available(let models):
+                    appState.isOllamaAvailable = true
+                    appState.ollamaModels = models
+                    if !models.contains(appState.selectedOllamaModel), let first = models.first {
+                        appState.selectedOllamaModel = first
+                    }
                     ollamaTestResult = "Connected — \(models.count) model(s) available"
                 case .unavailable:
+                    appState.isOllamaAvailable = false
+                    appState.ollamaModels = []
                     ollamaTestResult = "Connection failed — is Ollama running?"
                 }
                 isTesting = false

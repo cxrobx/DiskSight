@@ -1,11 +1,21 @@
 import Foundation
+import OSLog
 
 struct FileScanner {
+    private let logger = Logger(subsystem: "com.disksight.app", category: "FileScanner")
     private let repository: FileRepository
     private let batchSize = 1000
 
     init(repository: FileRepository) {
         self.repository = repository
+    }
+
+    /// Reconcile a changed directory subtree against disk state. This is used by
+    /// FSEvents batches when a directory was replaced or rebuilt in place, which
+    /// can leave stale descendants behind if we only upsert the directory row.
+    func syncSubtree(rootURL: URL, sessionId: Int64) async {
+        let stream = quickSync(rootURL: rootURL, since: 0, sessionId: sessionId)
+        for await _ in stream {}
     }
 
     private func shouldExcludeExternalVolume(
@@ -198,22 +208,15 @@ struct FileScanner {
                     // Recalculate ancestor sizes for all affected paths
                     if !affectedPaths.isEmpty {
                         try await repository.updateAncestorSizes(forPaths: affectedPaths)
-                        // Update root node size (updateAncestorSizes stops at "/" due to guard)
-                        if let root = try repository.rootNodeConcurrent() {
-                            let children = try repository.childrenWithSizesConcurrent(ofPath: root.path)
-                            let totalSize = children.reduce(Int64(0)) { $0 + $1.size }
-                            var updatedRoot = root
-                            updatedRoot.size = totalSize
-                            try await repository.insertFilesBatch([updatedRoot])
-                        }
+                        try await repository.refreshRootDirectorySize()
                     }
 
                     progress.completed = true
                     continuation.yield(progress)
                     continuation.finish()
                 } catch {
-                    print("FileScanner quickSync error: \(error)")
-                    continuation.yield(ScanProgress())
+                    logger.error("Quick sync failed: \(error.localizedDescription, privacy: .public)")
+                    continuation.yield(ScanProgress(errorMessage: error.localizedDescription))
                     continuation.finish()
                 }
             }
@@ -386,22 +389,15 @@ struct FileScanner {
                     // Recalculate ancestor sizes
                     if !affectedPaths.isEmpty {
                         try await repository.updateAncestorSizes(forPaths: affectedPaths)
-                        // Update root node size
-                        if let root = try repository.rootNodeConcurrent() {
-                            let children = try repository.childrenWithSizesConcurrent(ofPath: root.path)
-                            let totalSize = children.reduce(Int64(0)) { $0 + $1.size }
-                            var updatedRoot = root
-                            updatedRoot.size = totalSize
-                            try await repository.insertFilesBatch([updatedRoot])
-                        }
+                        try await repository.refreshRootDirectorySize()
                     }
 
                     progress.completed = true
                     continuation.yield(progress)
                     continuation.finish()
                 } catch {
-                    print("FileScanner incremental error: \(error)")
-                    continuation.yield(ScanProgress())
+                    logger.error("Incremental scan failed: \(error.localizedDescription, privacy: .public)")
+                    continuation.yield(ScanProgress(errorMessage: error.localizedDescription))
                     continuation.finish()
                 }
             }
@@ -512,7 +508,8 @@ struct FileScanner {
                     continuation.yield(progress)
                     continuation.finish()
                 } catch {
-                    print("FileScanner error: \(error)")
+                    logger.error("Full scan failed: \(error.localizedDescription, privacy: .public)")
+                    continuation.yield(ScanProgress(errorMessage: error.localizedDescription))
                     continuation.finish()
                 }
             }
