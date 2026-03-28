@@ -1,6 +1,6 @@
 import Foundation
 
-enum GrowthPeriod: String, CaseIterable, Identifiable {
+enum GrowthPeriod: String, CaseIterable, Identifiable, Sendable {
     case sevenDays = "7 Days"
     case fourteenDays = "14 Days"
     case thirtyDays = "30 Days"

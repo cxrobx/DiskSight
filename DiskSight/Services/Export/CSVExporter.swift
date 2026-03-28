@@ -20,6 +20,12 @@ enum CSVExporter {
     /// Stream CSV export to a file — loads files in pages of 5000 to avoid holding
     /// the entire dataset in memory. Never holds more than one page of FileNode structs.
     static func stream(from repository: FileRepository, sessionId: Int64, to url: URL) async throws {
+        try await Task.detached(priority: .utility) {
+            try streamSync(from: repository, sessionId: sessionId, to: url)
+        }.value
+    }
+
+    private static func streamSync(from repository: FileRepository, sessionId: Int64, to url: URL) throws {
         let pageSize = 5000
 
         // Write header
@@ -30,9 +36,9 @@ enum CSVExporter {
         defer { try? handle.close() }
         handle.seekToEndOfFile()
 
-        var offset = 0
+        var lastID: Int64 = 0
         while true {
-            let page = try await repository.allFiles(forSession: sessionId, limit: pageSize, offset: offset)
+            let page = try repository.exportPage(forSession: sessionId, afterID: lastID, limit: pageSize)
             guard !page.isEmpty else { break }
 
             var chunk = ""
@@ -41,12 +47,12 @@ enum CSVExporter {
                 chunk += csvLine(for: file)
             }
 
-            if let data = chunk.data(using: .utf8) {
-                handle.write(data)
+            if let data = chunk.data(using: .utf8), !data.isEmpty {
+                try handle.write(contentsOf: data)
             }
 
-            offset += page.count
-            if page.count < pageSize { break }
+            guard let pageLastID = page.last?.id else { break }
+            lastID = pageLastID
         }
     }
 

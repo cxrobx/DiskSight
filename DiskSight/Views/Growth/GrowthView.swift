@@ -5,6 +5,7 @@ struct GrowthView: View {
 
     private var folders: [FolderGrowth] { appState.growthFolders ?? [] }
     private var isLoading: Bool { appState.growthLoadingPeriod == appState.growthPeriod && appState.growthFolders == nil }
+    private var isRefreshingVisibleData: Bool { appState.growthLoadingPeriod == appState.growthPeriod && appState.growthFolders != nil }
 
     var totalGrowth: Int64 {
         folders.reduce(0) { $0 + $1.recentGrowthSize }
@@ -179,6 +180,9 @@ struct GrowthView: View {
 
     private var subtitleText: String {
         let summary = "\(folders.count) folders | \(SizeFormatter.format(totalGrowth)) added"
+        if isRefreshingVisibleData {
+            return summary + " | updating..."
+        }
         if appState.isSyncing {
             return summary + " | refreshing live"
         }

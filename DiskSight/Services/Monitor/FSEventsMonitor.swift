@@ -79,9 +79,25 @@ final class FSEventsMonitor: @unchecked Sendable {
     // MARK: - Event Processing
 
     fileprivate func handleEvents(paths: [String], flags: [UInt32], ids: [UInt64]) {
+        var filteredPaths: [String] = []
+        var filteredFlags: [UInt32] = []
+        var filteredIDs: [UInt64] = []
+
+        for index in paths.indices {
+            let path = paths[index]
+            if repository.isManagedStoragePath(path) {
+                continue
+            }
+            filteredPaths.append(path)
+            filteredFlags.append(flags[index])
+            filteredIDs.append(ids[index])
+        }
+
+        guard !filteredPaths.isEmpty else { return }
+
         // Check for MustScanSubDirs — macOS can't guarantee individual events,
         // so we need to trigger a full rescan instead of processing individual paths
-        for flag in flags {
+        for flag in filteredFlags {
             if flag & UInt32(kFSEventStreamEventFlagMustScanSubDirs) != 0 {
                 issueSubject.send(
                     AppOperationMessage(
@@ -97,8 +113,8 @@ final class FSEventsMonitor: @unchecked Sendable {
         }
 
         lock.lock()
-        for (index, path) in paths.enumerated() {
-            pendingEventFlags[path, default: 0] |= flags[index]
+        for (index, path) in filteredPaths.enumerated() {
+            pendingEventFlags[path, default: 0] |= filteredFlags[index]
         }
         lock.unlock()
 
@@ -111,8 +127,8 @@ final class FSEventsMonitor: @unchecked Sendable {
         }
 
         // Publish events for UI (subscriber collects these in time windows)
-        for (i, path) in paths.enumerated() {
-            let flag = flags[i]
+        for (i, path) in filteredPaths.enumerated() {
+            let flag = filteredFlags[i]
             let eventType: FSEventType
             if flag & UInt32(kFSEventStreamEventFlagItemRemoved) != 0 {
                 eventType = .deleted
@@ -126,7 +142,7 @@ final class FSEventsMonitor: @unchecked Sendable {
                 eventType = .modified
             }
 
-            eventSubject.send(FSEventInfo(path: path, type: eventType, eventId: ids[i]))
+            eventSubject.send(FSEventInfo(path: path, type: eventType, eventId: filteredIDs[i]))
         }
     }
 
@@ -282,6 +298,7 @@ final class FSEventsMonitor: @unchecked Sendable {
     }
 
     private func refreshedDirectoryNode(atPath path: String, resourceKeys: Set<URLResourceKey>) -> FileNode? {
+        guard !repository.isManagedStoragePath(path) else { return nil }
         let url = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         guard let values = try? url.resourceValues(forKeys: resourceKeys) else { return nil }

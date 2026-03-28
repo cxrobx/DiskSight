@@ -264,6 +264,7 @@ final class AppState: ObservableObject {
     private var growthRefreshQueued = false
     private let database: Database
     let fileRepository: FileRepository
+    private var storageFailureActive = false
     private var fsMonitor: FSEventsMonitor?
     private var eventCancellable: AnyCancellable?
     private var batchCancellable: AnyCancellable?
@@ -315,6 +316,20 @@ final class AppState: ObservableObject {
     }
 
     func startScan(at url: URL) {
+        guard !storageFailureActive else {
+            presentStorageFailureAlertIfNeeded()
+            return
+        }
+        guard !fileRepository.isManagedStoragePath(url.path) else {
+            presentAlert(
+                title: "Scan Location Unavailable",
+                message: "DiskSight can't scan its own Application Support folder. Choose a different location.",
+                level: .warning,
+                source: "Scan"
+            )
+            return
+        }
+
         scanTask?.cancel()
         incrementalSyncTask?.cancel()
         cachePrefetchTask?.cancel()
@@ -372,6 +387,7 @@ final class AppState: ObservableObject {
                 // Clean up files and sessions from previous scans
                 try? await fileRepository.deleteFilesFromPreviousSessions(currentSessionId: sessionId)
                 try? await fileRepository.deleteOldSessions(keepingId: sessionId)
+                try? await fileRepository.compactIfNeeded()
                 self.lastScanSession = try fileRepository.latestScanSession()
                 self.scanState = .completed
                 self.scheduleCacheWarmup()
@@ -403,6 +419,10 @@ final class AppState: ObservableObject {
     }
 
     func refreshMetrics() {
+        guard !storageFailureActive else {
+            presentStorageFailureAlertIfNeeded()
+            return
+        }
         guard case .completed = scanState else { return }
         guard !isSyncing else { return }
         guard let path = scanRootPath?.path ?? lastScanSession?.rootPath else { return }
@@ -417,6 +437,7 @@ final class AppState: ObservableObject {
     // MARK: - FSEvents Monitoring
 
     func startMonitoring(path: String) {
+        guard !storageFailureActive else { return }
         stopMonitoring()
         guard monitoringEnabled else { return }
 
@@ -684,6 +705,7 @@ final class AppState: ObservableObject {
     /// the FSEvents sink when real changes are detected.
     func handleBecameActive() {
         guard !Self.isRunningTests else { return }
+        guard !storageFailureActive else { return }
 
         // Only re-query if we have no session — avoids a redundant DB hit on every cmd-tab
         if lastScanSession == nil {
@@ -714,6 +736,7 @@ final class AppState: ObservableObject {
 
             isExportingCSV = true
             csvExportDone = false
+            defer { isExportingCSV = false }
             do {
                 try await CSVExporter.stream(from: fileRepository, sessionId: sessionId, to: url)
                 csvExportDone = true
@@ -737,7 +760,6 @@ final class AppState: ObservableObject {
                     source: "Export"
                 )
             }
-            isExportingCSV = false
         }
     }
 
@@ -974,21 +996,23 @@ final class AppState: ObservableObject {
             return
         }
 
-        // 2. DB cache hit (nonisolated, bypasses actor) → instant
-        if !requiresLiveRefresh,
-           let sessionId = lastScanSession?.id,
-           let persisted = fileRepository.cachedGrowthFoldersConcurrent(sessionId: sessionId, period: period) {
-            growthCache[period] = persisted
-            growthFolders = visibleGrowthFolders(persisted)
-            growthDisplayedDataVersion = dataVersion
-            growthLoadingPeriod = nil
-            return
-        }
-
-        // 3. Full cache miss — show loading, run SQL in background
+        // 2. Show loading, then load cached/fresh data in background.
         growthLoadingPeriod = period
         growthFolders = nil
         Task {
+            if let cached = await cachedGrowthPeriod(period) {
+                if growthPeriod == period {
+                    growthFolders = visibleGrowthFolders(cached)
+                    if !requiresLiveRefresh {
+                        growthDisplayedDataVersion = dataVersion
+                    }
+                }
+                if !requiresLiveRefresh, growthLoadingPeriod == period {
+                    growthLoadingPeriod = nil
+                    return
+                }
+            }
+
             let results = await loadGrowthPeriod(period, forceRefresh: requiresLiveRefresh)
             if growthPeriod == period {
                 growthFolders = visibleGrowthFolders(results)
@@ -1008,26 +1032,16 @@ final class AppState: ObservableObject {
 
         guard growthFolders == nil || requiresLiveRefresh else { return }
 
-        // Try in-memory cache
-        if !requiresLiveRefresh, let cached = growthCache[period] {
+        if let cached = await cachedGrowthPeriod(period) {
             growthFolders = visibleGrowthFolders(cached)
-            growthDisplayedDataVersion = dataVersion
-            return
+            if !requiresLiveRefresh {
+                growthDisplayedDataVersion = dataVersion
+                growthLoadingPeriod = nil
+                return
+            }
         }
 
-        // Try DB cache (nonisolated, fast)
-        if !requiresLiveRefresh,
-           let sessionId = lastScanSession?.id,
-           let persisted = fileRepository.cachedGrowthFoldersConcurrent(sessionId: sessionId, period: period) {
-            growthCache[period] = persisted
-            growthFolders = visibleGrowthFolders(persisted)
-            growthDisplayedDataVersion = dataVersion
-            return
-        }
-
-        // Full miss — async SQL
         growthLoadingPeriod = period
-        growthFolders = nil
         let results = await loadGrowthPeriod(period, forceRefresh: requiresLiveRefresh)
         if growthPeriod == period {
             growthFolders = visibleGrowthFolders(results)
@@ -1232,6 +1246,8 @@ final class AppState: ObservableObject {
         if incrementUnread && !showActivityLog && level != .info {
             unreadActivityCount += 1
         }
+
+        handlePersistentStorageFailureIfNeeded(message: normalizedMessage)
     }
 
     func clearActivityLog() {
@@ -1413,25 +1429,55 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func persistedGrowthCache(sessionId: Int64, period: GrowthPeriod) async -> [FolderGrowth]? {
+        let repository = fileRepository
+        return await Task.detached(priority: .utility) {
+            repository.cachedGrowthFoldersConcurrent(sessionId: sessionId, period: period)
+        }.value
+    }
+
+    private func cachedGrowthPeriod(_ period: GrowthPeriod) async -> [FolderGrowth]? {
+        if let cached = growthCache[period] {
+            return cached
+        }
+
+        if let sessionId = lastScanSession?.id,
+           let persisted = await persistedGrowthCache(sessionId: sessionId, period: period) {
+            growthCache[period] = persisted
+            return persisted
+        }
+
+        return nil
+    }
+
+    private func queryGrowthFolders(period: GrowthPeriod) async -> [FolderGrowth] {
+        let repository = fileRepository
+        let cutoff = period.cutoffDate.timeIntervalSince1970
+        let excludePrefix = hideExternalDrives ? "/Volumes/" : nil
+        return await Task.detached(priority: .utility) {
+            (try? repository.recentlyGrowingFoldersConcurrent(createdAfter: cutoff, excludePrefix: excludePrefix)) ?? []
+        }.value
+    }
+
+    private func persistGrowthCache(_ folders: [FolderGrowth], sessionId: Int64, period: GrowthPeriod) {
+        let repository = fileRepository
+        Task.detached(priority: .utility) {
+            try? await repository.upsertGrowthCache(sessionId: sessionId, period: period, folders: folders)
+        }
+    }
+
     private func loadGrowthPeriod(_ period: GrowthPeriod, forceRefresh: Bool) async -> [FolderGrowth] {
         ensureGrowthCacheFreshForCurrentDataVersion()
         if !forceRefresh {
-            if let cached = growthCache[period] {
-                return cached
-            }
-            if let sessionId = lastScanSession?.id,
-               let persisted = try? await fileRepository.cachedGrowthFolders(sessionId: sessionId, period: period) {
-                growthCache[period] = persisted
+            if let persisted = await cachedGrowthPeriod(period) {
                 return persisted
             }
         }
 
-        let cutoff = period.cutoffDate.timeIntervalSince1970
-        let excludePrefix = hideExternalDrives ? "/Volumes/" : nil
-        let results = (try? fileRepository.recentlyGrowingFoldersConcurrent(createdAfter: cutoff, excludePrefix: excludePrefix)) ?? []
+        let results = await queryGrowthFolders(period: period)
         growthCache[period] = results
         if let sessionId = lastScanSession?.id {
-            try? await fileRepository.upsertGrowthCache(sessionId: sessionId, period: period, folders: results)
+            persistGrowthCache(results, sessionId: sessionId, period: period)
         }
         return results
     }
@@ -1445,7 +1491,7 @@ final class AppState: ObservableObject {
             guard let self else { return }
 
             let selectedPeriod = self.growthPeriod
-            let selectedResults = await self.loadGrowthPeriod(selectedPeriod, forceRefresh: true)
+            let selectedResults = await self.loadGrowthPeriod(selectedPeriod, forceRefresh: false)
             if self.growthPeriod == selectedPeriod && self.growthFolders == nil {
                 self.growthFolders = self.visibleGrowthFolders(selectedResults)
                 self.growthDisplayedDataVersion = self.dataVersion
@@ -1453,7 +1499,7 @@ final class AppState: ObservableObject {
 
             for period in GrowthPeriod.allCases where period != selectedPeriod {
                 if Task.isCancelled { return }
-                _ = await self.loadGrowthPeriod(period, forceRefresh: true)
+                _ = await self.loadGrowthPeriod(period, forceRefresh: false)
             }
         }
     }
@@ -1511,6 +1557,8 @@ final class AppState: ObservableObject {
                 }
             }
         }
+
+        sanitizeManagedStorageIfNeeded()
     }
 
     private func refreshVisibilityFilteredData() async {
@@ -1549,6 +1597,9 @@ final class AppState: ObservableObject {
     }
 
     func shouldIncludePath(_ path: String) -> Bool {
+        if fileRepository.isManagedStoragePath(path) {
+            return false
+        }
         guard hideExternalDrives else { return true }
         if path == "/Volumes" { return false }
         return !path.hasPrefix("/Volumes/")
@@ -1560,5 +1611,62 @@ final class AppState: ObservableObject {
 
     private func visibleGrowthFolders(_ folders: [FolderGrowth]) -> [FolderGrowth] {
         folders.filter { shouldIncludePath($0.folderPath) }
+    }
+
+    private func sanitizeManagedStorageIfNeeded() {
+        guard let session = lastScanSession else { return }
+
+        let scanRoot = URL(fileURLWithPath: session.rootPath).standardizedFileURL.path
+        let storagePath = fileRepository.managedStorageDirectoryPath
+        let sessionCanContainManagedStorage = fileRepository.isManagedStoragePath(scanRoot)
+            || scanRoot == "/"
+            || storagePath.hasPrefix(scanRoot + "/")
+        guard sessionCanContainManagedStorage else { return }
+
+        Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+
+            do {
+                let deletedCount = try await self.fileRepository.deleteIndexedPaths(inExcludedRoots: [storagePath])
+                guard deletedCount > 0 else { return }
+
+                try await self.fileRepository.updateAncestorSizes(forPaths: Set([storagePath]))
+                try await self.fileRepository.refreshRootDirectorySize()
+                await self.refreshAfterIndexedFileMutation()
+                try? await self.fileRepository.compactIfNeeded()
+
+                self.recordActivity(
+                    level: .warning,
+                    title: "Removed DiskSight Storage from Results",
+                    message: "DiskSight removed its own private database folder from the indexed data and refreshed totals.",
+                    source: "Storage",
+                    incrementUnread: false
+                )
+            } catch {
+                self.logger.error("Failed to sanitize managed storage paths: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func handlePersistentStorageFailureIfNeeded(message: String) {
+        guard !storageFailureActive else { return }
+        guard Database.isLikelyPersistentStorageFailure(message: message) else { return }
+
+        storageFailureActive = true
+        scanTask?.cancel()
+        incrementalSyncTask?.cancel()
+        isSyncing = false
+        isAnalyzingCleanup = false
+        cleanupProgress = nil
+        stopMonitoring()
+        presentStorageFailureAlertIfNeeded()
+    }
+
+    private func presentStorageFailureAlertIfNeeded() {
+        let storagePath = database.storageDirectoryURL.path
+        activeAlert = AppAlertInfo(
+            title: "Disk Index Unavailable",
+            message: "DiskSight lost access to its local index in \(storagePath). Quit and reopen the app to let DiskSight recover it. If the problem returns, check disk space and folder permissions."
+        )
     }
 }

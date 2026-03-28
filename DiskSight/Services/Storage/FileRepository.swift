@@ -9,6 +9,14 @@ actor FileRepository {
         self.database = database
     }
 
+    nonisolated var managedStorageDirectoryPath: String {
+        database.storageDirectoryURL.standardizedFileURL.path
+    }
+
+    nonisolated func isManagedStoragePath(_ path: String) -> Bool {
+        Database.isManagedStoragePath(path, databaseURL: database.databaseURL)
+    }
+
     // MARK: - Scan Sessions
 
     func createScanSession(rootPath: String) throws -> ScanSession {
@@ -83,6 +91,75 @@ actor FileRepository {
                 arguments: [keepingId]
             )
         }
+    }
+
+    func deleteIndexedPaths(inExcludedRoots roots: [String]) throws -> Int {
+        let uniqueRoots = Array(Set(roots))
+        guard !uniqueRoots.isEmpty else { return 0 }
+
+        return try database.dbPool.write { db in
+            var deletedCount = 0
+            for root in uniqueRoots {
+                deletedCount += try Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM files
+                        WHERE path = ?1
+                           OR (length(path) > length(?1) AND substr(path, 1, length(?1) + 1) = ?1 || '/')
+                        """,
+                    arguments: [root]
+                ) ?? 0
+
+                try db.execute(
+                    sql: """
+                        DELETE FROM files
+                        WHERE path = ?1
+                           OR (length(path) > length(?1) AND substr(path, 1, length(?1) + 1) = ?1 || '/')
+                        """,
+                    arguments: [root]
+                )
+            }
+            return deletedCount
+        }
+    }
+
+    func compactIfNeeded(
+        minimumFreeBytes: Int64 = 64 * 1024 * 1024,
+        minimumFreeRatio: Double = 0.20,
+        minimumWALBytes: Int64 = 64 * 1024 * 1024
+    ) throws -> Bool {
+        let walURL = URL(fileURLWithPath: database.databaseURL.path + "-wal")
+        let walBytes = (try? walURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+
+        var didWork = false
+        if walBytes >= minimumWALBytes {
+            try database.dbPool.barrierWriteWithoutTransaction { db in
+                try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            }
+            didWork = true
+        }
+
+        let stats = try database.dbPool.read { db in
+            let pageSize = Int64(try Int.fetchOne(db, sql: "PRAGMA page_size") ?? 0)
+            let pageCount = Int64(try Int.fetchOne(db, sql: "PRAGMA page_count") ?? 0)
+            let freelistCount = Int64(try Int.fetchOne(db, sql: "PRAGMA freelist_count") ?? 0)
+            return (pageSize, pageCount, freelistCount)
+        }
+
+        let freeBytes = stats.0 * stats.2
+        let totalBytes = stats.0 * stats.1
+        let freeRatio = totalBytes > 0 ? Double(freeBytes) / Double(totalBytes) : 0
+        guard freeBytes >= minimumFreeBytes || freeRatio >= minimumFreeRatio else {
+            return didWork
+        }
+
+        try database.dbPool.barrierWriteWithoutTransaction { db in
+            try db.execute(sql: "VACUUM")
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+
+        return true
     }
 
     // MARK: - File Operations
@@ -352,48 +429,60 @@ actor FileRepository {
         }
     }
 
-    /// Returns paths of all files that are duplicates (share a content_hash with another file).
+    /// Returns paths of all files in a scan session that are duplicates
+    /// (share a content_hash with another file in the same session).
     /// SQL-only — avoids loading full FileNode/DuplicateGroup objects into memory.
-    func duplicateFilePaths() throws -> Set<String> {
+    func duplicateFilePaths(forSession sessionId: Int64) throws -> Set<String> {
         try database.dbPool.read { db in
             let rows = try Row.fetchAll(db, sql: """
                 SELECT path FROM files
-                WHERE is_directory = 0 AND content_hash IN (
+                WHERE scan_session_id = ?
+                  AND is_directory = 0
+                  AND content_hash IN (
                     SELECT content_hash FROM files
-                    WHERE is_directory = 0 AND content_hash IS NOT NULL
+                    WHERE scan_session_id = ?
+                      AND is_directory = 0
+                      AND content_hash IS NOT NULL
                     GROUP BY content_hash HAVING COUNT(*) > 1
                 )
-                """)
+                """, arguments: [sessionId, sessionId])
             return Set(rows.compactMap { $0["path"] as String? })
         }
     }
 
-    /// Returns paths of stale files matching the given criteria.
+    /// Returns paths of stale files in a scan session matching the given criteria.
     /// SQL-only — avoids loading full FileNode objects into memory.
-    func staleFilePaths(accessedBefore cutoff: Double, minSize: Int64 = 1_048_576) throws -> Set<String> {
+    func staleFilePaths(
+        forSession sessionId: Int64,
+        accessedBefore cutoff: Double,
+        minSize: Int64 = 1_048_576
+    ) throws -> Set<String> {
         try database.dbPool.read { db in
             let rows = try Row.fetchAll(db, sql: """
                 SELECT path FROM files
-                WHERE is_directory = 0
+                WHERE scan_session_id = ?
+                  AND is_directory = 0
                   AND accessed_at IS NOT NULL
                   AND accessed_at < ?
                   AND size >= ?
-                """, arguments: [cutoff, minSize])
+                """, arguments: [sessionId, cutoff, minSize])
             return Set(rows.compactMap { $0["path"] as String? })
         }
     }
 
-    /// Returns paths of files matching any of the given LIKE patterns (cache detection).
+    /// Returns paths of files in a scan session matching any of the given LIKE patterns (cache detection).
     /// SQL-only — avoids loading full CacheDetector pipeline.
-    func cacheMatchingPaths(patterns: [String]) throws -> Set<String> {
+    func cacheMatchingPaths(forSession sessionId: Int64, patterns: [String]) throws -> Set<String> {
         guard !patterns.isEmpty else { return [] }
         return try database.dbPool.read { db in
             var paths = Set<String>()
             for pattern in patterns {
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT path FROM files
-                    WHERE path LIKE ? AND is_directory = 0
-                    """, arguments: [pattern])
+                    WHERE scan_session_id = ?
+                      AND path LIKE ?
+                      AND is_directory = 0
+                    """, arguments: [sessionId, pattern])
                 for row in rows {
                     if let path: String = row["path"] {
                         paths.insert(path)
@@ -738,11 +827,12 @@ actor FileRepository {
         }
     }
 
-    func allFiles(forSession sessionId: Int64, limit: Int, offset: Int) throws -> [FileNode] {
+    nonisolated func exportPage(forSession sessionId: Int64, afterID lastID: Int64, limit: Int) throws -> [FileNode] {
         try database.dbPool.read { db in
             try FileNode.filter(Column("scan_session_id") == sessionId)
-                .order(Column("path"))
-                .limit(limit, offset: offset)
+                .filter(Column("id") > lastID)
+                .order(Column("id"))
+                .limit(limit)
                 .fetchAll(db)
         }
     }
@@ -825,9 +915,10 @@ actor FileRepository {
 
             let growthRows = try Row.fetchAll(db, sql: """
                 SELECT parent_path, SUM(size) AS recent_size, COUNT(*) AS recent_count
-                FROM files
+                FROM files INDEXED BY idx_files_growth
                 WHERE is_directory = 0
                   AND size > 0
+                  AND created_at IS NOT NULL
                   AND created_at >= ?\(excludeClause)
                 GROUP BY parent_path
                 ORDER BY recent_size DESC

@@ -14,10 +14,12 @@ final class Database: Sendable {
     let dbPool: DatabasePool
     let databaseURL: URL
     let startupIssue: DatabaseStartupIssue?
+    var storageDirectoryURL: URL { databaseURL.deletingLastPathComponent() }
 
     init(databaseURL: URL) throws {
         try Self.ensureParentDirectory(for: databaseURL)
         let dbPool = try Self.makeDatabasePool(at: databaseURL)
+        try Self.configureVacuumMode(on: dbPool)
         try Self.migrator.migrate(dbPool)
 
         self.dbPool = dbPool
@@ -114,6 +116,35 @@ final class Database: Sendable {
         )
     }
 
+    static func isManagedStoragePath(_ path: String, databaseURL: URL) -> Bool {
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        let storagePath = databaseURL.deletingLastPathComponent().standardizedFileURL.path
+        return normalizedPath == storagePath || normalizedPath.hasPrefix(storagePath + "/")
+    }
+
+    static func isLikelyPersistentStorageFailure(_ error: Error) -> Bool {
+        if let error = error as? DatabaseError {
+            switch error.resultCode.primaryResultCode {
+            case .SQLITE_IOERR, .SQLITE_READONLY, .SQLITE_FULL, .SQLITE_CANTOPEN, .SQLITE_CORRUPT, .SQLITE_NOTADB:
+                return true
+            default:
+                break
+            }
+        }
+
+        return isLikelyPersistentStorageFailure(message: error.localizedDescription)
+    }
+
+    static func isLikelyPersistentStorageFailure(message: String) -> Bool {
+        let normalized = message.lowercased()
+        return normalized.contains("disk i/o error")
+            || normalized.contains("readonly database")
+            || normalized.contains("database or disk is full")
+            || normalized.contains("unable to open the database file")
+            || normalized.contains("database disk image is malformed")
+            || normalized.contains("not a database")
+    }
+
     private static func makeDatabasePool(at databaseURL: URL) throws -> DatabasePool {
         var config = Configuration()
         config.prepareDatabase { db in
@@ -127,6 +158,13 @@ final class Database: Sendable {
         }
 
         return try DatabasePool(path: databaseURL.path, configuration: config)
+    }
+
+    private static func configureVacuumMode(on dbPool: DatabasePool) throws {
+        try dbPool.barrierWriteWithoutTransaction { db in
+            // Keep free pages reclaimable after large deletes such as scan-session cleanup.
+            try db.execute(sql: "PRAGMA auto_vacuum = INCREMENTAL")
+        }
     }
 
     private static func backupCorruptedDatabaseArtifacts(at databaseURL: URL) throws -> URL {
@@ -282,6 +320,14 @@ final class Database: Sendable {
                 ON files (created_at, parent_path, size)
                 WHERE is_directory = 0 AND created_at IS NOT NULL
                 """)
+        }
+
+        migrator.registerMigration("v10_export_paging_index") { db in
+            try db.create(
+                index: "idx_files_session_id",
+                on: "files",
+                columns: ["scan_session_id", "id"]
+            )
         }
 
         return migrator

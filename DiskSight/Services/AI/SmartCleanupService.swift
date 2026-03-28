@@ -72,9 +72,42 @@ actor SmartCleanupService {
                     }
 
                     // 3. Load cross-analysis signals (best-effort, don't block on failures)
-                    let duplicatePaths = (try? await self.loadDuplicatePaths(repository: repository)) ?? []
-                    let stalePaths = (try? await self.loadStalePaths(repository: repository)) ?? []
-                    let cachePaths = (try? await self.loadCachePaths(repository: repository)) ?? []
+                    let signalProgress = ClassificationProgress(
+                        processed: totalFiles,
+                        total: totalFiles,
+                        currentFile: "Checking duplicate files..."
+                    )
+                    continuation.yield((signalProgress, []))
+                    let duplicatePaths = (try? await self.loadDuplicatePaths(
+                        sessionId: sessionId,
+                        repository: repository
+                    )) ?? []
+
+                    continuation.yield((
+                        ClassificationProgress(
+                            processed: totalFiles,
+                            total: totalFiles,
+                            currentFile: "Checking stale files..."
+                        ),
+                        []
+                    ))
+                    let stalePaths = (try? await self.loadStalePaths(
+                        sessionId: sessionId,
+                        repository: repository
+                    )) ?? []
+
+                    continuation.yield((
+                        ClassificationProgress(
+                            processed: totalFiles,
+                            total: totalFiles,
+                            currentFile: "Checking caches..."
+                        ),
+                        []
+                    ))
+                    let cachePaths = (try? await self.loadCachePaths(
+                        sessionId: sessionId,
+                        repository: repository
+                    )) ?? []
 
                     // 4. If we have any cross-analysis signals, merge them and yield updated results
                     if !duplicatePaths.isEmpty || !stalePaths.isEmpty || !cachePaths.isEmpty {
@@ -104,16 +137,20 @@ actor SmartCleanupService {
 
     // MARK: - Cross-Analysis Signal Loading (SQL-only, memory-efficient)
 
-    private func loadDuplicatePaths(repository: FileRepository) async throws -> Set<String> {
-        try await repository.duplicateFilePaths()
+    private func loadDuplicatePaths(sessionId: Int64, repository: FileRepository) async throws -> Set<String> {
+        try await repository.duplicateFilePaths(forSession: sessionId)
     }
 
-    private func loadStalePaths(repository: FileRepository) async throws -> Set<String> {
+    private func loadStalePaths(sessionId: Int64, repository: FileRepository) async throws -> Set<String> {
         let sixMonthsAgo = Date().timeIntervalSince1970 - (180 * 24 * 60 * 60)
-        return try await repository.staleFilePaths(accessedBefore: sixMonthsAgo, minSize: 1_048_576)
+        return try await repository.staleFilePaths(
+            forSession: sessionId,
+            accessedBefore: sixMonthsAgo,
+            minSize: 1_048_576
+        )
     }
 
-    private func loadCachePaths(repository: FileRepository) async throws -> Set<String> {
+    private func loadCachePaths(sessionId: Int64, repository: FileRepository) async throws -> Set<String> {
         try await CacheDetector.ensureDefaultPatterns(repository: repository)
         // Load cache patterns and expand them to SQL LIKE patterns
         let patterns = try await repository.allCachePatterns()
@@ -123,7 +160,7 @@ actor SmartCleanupService {
                 .replacingOccurrences(of: "**", with: "%")
                 .replacingOccurrences(of: "*", with: "%")
         }
-        return try await repository.cacheMatchingPaths(patterns: expandedPatterns)
+        return try await repository.cacheMatchingPaths(forSession: sessionId, patterns: expandedPatterns)
     }
 
     // MARK: - LLM Enhancement

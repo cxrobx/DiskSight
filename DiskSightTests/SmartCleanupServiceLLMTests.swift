@@ -81,4 +81,74 @@ final class SmartCleanupServiceLLMTests: XCTestCase {
         XCTAssertEqual(recommendation.confidence, .risky)
         XCTAssertTrue(recommendation.signals.contains(.knownCache))
     }
+
+    func testAnalyzeDoesNotMergeSignalsFromOtherSessions() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let databaseURL = tempDirectory.appendingPathComponent("disksight.sqlite")
+        let database = try Database(databaseURL: databaseURL)
+        let repository = FileRepository(database: database)
+
+        let currentSession = try await repository.createScanSession(rootPath: NSHomeDirectory())
+        let currentSessionId = try XCTUnwrap(currentSession.id)
+        let otherSession = try await repository.createScanSession(rootPath: NSHomeDirectory())
+        let otherSessionId = try XCTUnwrap(otherSession.id)
+
+        let currentFilePath = tempDirectory.appendingPathComponent("Foo.class").path
+        let currentFile = FileNode(
+            id: nil,
+            path: currentFilePath,
+            name: "Foo.class",
+            parentPath: tempDirectory.path,
+            size: 4_096,
+            isDirectory: false,
+            modifiedAt: nil,
+            accessedAt: nil,
+            createdAt: nil,
+            contentHash: "shared-hash",
+            partialHash: nil,
+            fileType: nil,
+            scanSessionId: currentSessionId
+        )
+        let otherFile = FileNode(
+            id: nil,
+            path: tempDirectory.appendingPathComponent("Bar.class").path,
+            name: "Bar.class",
+            parentPath: tempDirectory.path,
+            size: 4_096,
+            isDirectory: false,
+            modifiedAt: nil,
+            accessedAt: nil,
+            createdAt: nil,
+            contentHash: "shared-hash",
+            partialHash: nil,
+            fileType: nil,
+            scanSessionId: otherSessionId
+        )
+        try await repository.insertFilesBatch([currentFile, otherFile])
+
+        let service = SmartCleanupService(
+            classifier: FileClassifier(),
+            repository: repository,
+            llmService: nil
+        )
+
+        let stream = await service.analyze(sessionId: currentSessionId, llmModel: nil)
+        var latestRecommendations: [CleanupRecommendation] = []
+        for await (_, recommendations) in stream {
+            if !recommendations.isEmpty {
+                latestRecommendations = recommendations
+            }
+        }
+
+        let recommendation = try XCTUnwrap(
+            latestRecommendations.first(where: { $0.filePath == currentFilePath })
+        )
+        XCTAssertFalse(recommendation.signals.contains(.duplicate))
+    }
 }

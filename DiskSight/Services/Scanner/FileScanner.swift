@@ -14,6 +14,7 @@ struct FileScanner {
     /// FSEvents batches when a directory was replaced or rebuilt in place, which
     /// can leave stale descendants behind if we only upsert the directory row.
     func syncSubtree(rootURL: URL, sessionId: Int64) async {
+        guard !repository.isManagedStoragePath(rootURL.path) else { return }
         let stream = quickSync(rootURL: rootURL, since: 0, sessionId: sessionId)
         for await _ in stream {}
     }
@@ -70,6 +71,10 @@ struct FileScanner {
                         let dirPath = dirURL.path
                         let isNewToDb = entry.isNewToDb
 
+                        if repository.isManagedStoragePath(dirPath) {
+                            continue
+                        }
+
                         // Get directory mtime
                         let dirValues = try? dirURL.resourceValues(forKeys: [.contentModificationDateKey, .isSymbolicLinkKey])
 
@@ -106,6 +111,10 @@ struct FileScanner {
                                 let modifiedAt = values.contentModificationDate?.timeIntervalSince1970
 
                                 if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                                    fsChildPaths.remove(path)
+                                    continue
+                                }
+                                if repository.isManagedStoragePath(path) {
                                     fsChildPaths.remove(path)
                                     continue
                                 }
@@ -262,6 +271,10 @@ struct FileScanner {
 
                         let dirPath = dirURL.path
 
+                        if repository.isManagedStoragePath(dirPath) {
+                            continue
+                        }
+
                         // Skip symbolic links
                         let dirValues = try? dirURL.resourceValues(forKeys: [.isSymbolicLinkKey])
                         if dirValues?.isSymbolicLink == true { continue }
@@ -291,6 +304,10 @@ struct FileScanner {
                             let modifiedAt = values.contentModificationDate?.timeIntervalSince1970
 
                             if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                                fsChildPaths.remove(path)
+                                continue
+                            }
+                            if repository.isManagedStoragePath(path) {
                                 fsChildPaths.remove(path)
                                 continue
                             }
@@ -409,6 +426,12 @@ struct FileScanner {
         AsyncStream { continuation in
             let producerTask = Task {
                 do {
+                    guard !repository.isManagedStoragePath(rootURL.path) else {
+                        continuation.yield(ScanProgress(errorMessage: "DiskSight can't scan its own storage folder."))
+                        continuation.finish()
+                        return
+                    }
+
                     var progress = ScanProgress()
                     var batch: [FileNode] = []
 
@@ -460,6 +483,12 @@ struct FileScanner {
                         }
                         let isDir = values.isDirectory ?? false
                         if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                            if isDir {
+                                enumerator.skipDescendants()
+                            }
+                            continue
+                        }
+                        if repository.isManagedStoragePath(fileURL.path) {
                             if isDir {
                                 enumerator.skipDescendants()
                             }
