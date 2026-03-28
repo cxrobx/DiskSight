@@ -19,7 +19,6 @@ final class Database: Sendable {
     init(databaseURL: URL) throws {
         try Self.ensureParentDirectory(for: databaseURL)
         let dbPool = try Self.makeDatabasePool(at: databaseURL)
-        try Self.configureVacuumMode(on: dbPool)
         try Self.migrator.migrate(dbPool)
 
         self.dbPool = dbPool
