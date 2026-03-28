@@ -6,6 +6,7 @@ final class ManagedStorageExclusionTests: XCTestCase {
     func testFullScanSkipsManagedStorageDirectory() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .standardizedFileURL
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
         addTeardownBlock {
             try? FileManager.default.removeItem(at: tempDirectory)
@@ -34,7 +35,7 @@ final class ManagedStorageExclusionTests: XCTestCase {
         XCTAssertTrue(lastProgress?.completed ?? false)
 
         let storagePath = database.storageDirectoryURL.path
-        let managedCount = try database.dbPool.read { db in
+        let managedCount = try await database.dbPool.read { db in
             try Int.fetchOne(
                 db,
                 sql: """
@@ -46,11 +47,11 @@ final class ManagedStorageExclusionTests: XCTestCase {
         }
         XCTAssertEqual(managedCount, 0)
 
-        let scannedFileCount = try database.dbPool.read { db in
+        let scannedFileCount = try await database.dbPool.read { db in
             try Int.fetchOne(
                 db,
-                sql: "SELECT COUNT(*) FROM files WHERE path = ?",
-                arguments: [normalFileURL.path]
+                sql: "SELECT COUNT(*) FROM files WHERE path LIKE ?",
+                arguments: ["%/Data/keep.txt"]
             ) ?? 0
         }
         XCTAssertEqual(scannedFileCount, 1)

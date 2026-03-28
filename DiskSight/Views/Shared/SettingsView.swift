@@ -24,7 +24,8 @@ struct SettingsView: View {
     @AppStorage("visualizationMode") private var defaultVizMode: VisualizationMode = .treemap
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
     @AppStorage("llmEnabled") private var llmEnabled = false
-    @State private var ollamaTestResult: String?
+    @State private var providerTestResult: String?
+    @State private var providerTestSucceeded = false
     @State private var isTesting = false
 
     var body: some View {
@@ -63,34 +64,48 @@ struct SettingsView: View {
 
             Section("Smart Cleanup") {
                 Toggle("Enable LLM enhancement", isOn: $llmEnabled)
-                Text("Use a local Ollama model for enhanced file explanations")
+                Picker("Provider", selection: $appState.cleanupLLMProvider) {
+                    ForEach(CleanupLLMProvider.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
+                    }
+                }
+
+                Text(appState.cleanupLLMProvider.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if llmEnabled {
-                    TextField("Ollama URL", text: $appState.ollamaBaseURL)
-                        .textFieldStyle(.roundedBorder)
+                LabeledContent("Status", value: appState.selectedLLMStatusDescription)
 
-                    TextField("Model name", text: $appState.selectedOllamaModel)
-                        .textFieldStyle(.roundedBorder)
+                if llmEnabled {
+                    switch appState.cleanupLLMProvider {
+                    case .ollama:
+                        TextField("Ollama URL", text: $appState.ollamaBaseURL)
+                            .textFieldStyle(.roundedBorder)
+
+                        TextField("Model name", text: $appState.selectedOllamaModel)
+                            .textFieldStyle(.roundedBorder)
+                    case .claudeHeadless:
+                        TextField("Claude model", text: $appState.selectedClaudeModel)
+                            .textFieldStyle(.roundedBorder)
+                    }
 
                     HStack {
                         Button {
-                            testConnection()
+                            testProvider()
                         } label: {
                             if isTesting {
                                 ProgressView()
                                     .controlSize(.small)
                             } else {
-                                Text("Test Connection")
+                                Text("Test Provider")
                             }
                         }
                         .disabled(isTesting)
 
-                        if let result = ollamaTestResult {
+                        if let result = providerTestResult {
                             Text(result)
                                 .font(.caption)
-                                .foregroundStyle(result.contains("Connected") ? .green : .red)
+                                .foregroundStyle(providerTestSucceeded ? .green : .red)
                         }
                     }
                 }
@@ -117,30 +132,65 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 450, height: 500)
+        .frame(width: 450, height: 560)
+        .task {
+            await appState.checkLLMStatus()
+        }
+        .onChange(of: appState.cleanupLLMProvider) { _, _ in
+            providerTestResult = nil
+            Task { await appState.checkLLMStatus() }
+        }
     }
 
-    private func testConnection() {
+    private func testProvider() {
         isTesting = true
-        ollamaTestResult = nil
+        providerTestResult = nil
+        providerTestSucceeded = false
         Task {
-            let client = OllamaClient(baseURL: appState.ollamaBaseURL)
-            let status = await client.checkAvailability()
             await MainActor.run {
-                switch status {
-                case .available(let models):
-                    appState.isOllamaAvailable = true
-                    appState.ollamaModels = models
-                    if !models.contains(appState.selectedOllamaModel), let first = models.first {
-                        appState.selectedOllamaModel = first
+                providerTestResult = nil
+            }
+
+            switch appState.cleanupLLMProvider {
+            case .ollama:
+                let client = OllamaClient(baseURL: appState.ollamaBaseURL)
+                let status = await client.checkAvailability()
+                await MainActor.run {
+                    switch status {
+                    case .available(let models):
+                        appState.isOllamaAvailable = true
+                        appState.ollamaModels = models
+                        if !models.contains(appState.selectedOllamaModel), let first = models.first {
+                            appState.selectedOllamaModel = first
+                        }
+                        providerTestResult = "Connected - \(models.count) model(s) available"
+                        providerTestSucceeded = true
+                    case .unavailable:
+                        appState.isOllamaAvailable = false
+                        appState.ollamaModels = []
+                        providerTestResult = "Connection failed - is Ollama running?"
+                        providerTestSucceeded = false
                     }
-                    ollamaTestResult = "Connected — \(models.count) model(s) available"
-                case .unavailable:
-                    appState.isOllamaAvailable = false
-                    appState.ollamaModels = []
-                    ollamaTestResult = "Connection failed — is Ollama running?"
+                    isTesting = false
                 }
-                isTesting = false
+            case .claudeHeadless:
+                let client = ClaudeCLIClient()
+                let status = await client.checkAvailability()
+                await MainActor.run {
+                    switch status {
+                    case .available(let version):
+                        appState.isClaudeAvailable = true
+                        appState.claudeVersion = version
+                        providerTestResult = version.map { "Claude CLI available - \($0)" } ?? "Claude CLI available"
+                        providerTestSucceeded = true
+                    case .unavailable(let message):
+                        appState.isClaudeAvailable = false
+                        appState.claudeVersion = nil
+                        providerTestResult = message
+                        providerTestSucceeded = false
+                    }
+                    isTesting = false
+                }
             }
         }
     }

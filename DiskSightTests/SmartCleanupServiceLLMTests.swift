@@ -17,6 +17,34 @@ private actor FakeLLMService: CleanupLLMServing {
 }
 
 final class SmartCleanupServiceLLMTests: XCTestCase {
+    func testClaudeHeadlessExtractsJSONEnvelopeResult() {
+        let stdout = """
+        \u{001B}]0;Claude Code\u{0007}
+        {"type":"result","result":"[{\\"path\\":\\"/tmp/cache.db\\",\\"category\\":\\"Cache\\",\\"confidence\\":\\"safe\\",\\"explanation\\":\\"App cache\\"}]"}
+        """
+
+        let extracted = ClaudeCLIClient.extractResponseText(from: stdout)
+        let analyses = CleanupLLMResponseParser.parseAnalysis(from: extracted)
+
+        XCTAssertEqual(analyses.count, 1)
+        XCTAssertEqual(analyses.first?.filePath, "/tmp/cache.db")
+        XCTAssertEqual(analyses.first?.category, .cache)
+        XCTAssertEqual(analyses.first?.confidence, .safe)
+        XCTAssertEqual(analyses.first?.explanation, "App cache")
+    }
+
+    func testClaudeHeadlessBuildsProcessEnvironment() {
+        let environment = ClaudeCLIClient.buildProcessEnvironment([
+            "PATH": "/usr/bin:/bin",
+            "CLAUDECODE": "1",
+            "CLAUDE_PROJECT": "nested"
+        ])
+
+        XCTAssertTrue(environment["PATH"]?.hasPrefix("/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin") ?? false)
+        XCTAssertNil(environment["CLAUDECODE"])
+        XCTAssertNil(environment["CLAUDE_PROJECT"])
+    }
+
     func testAnalyzeUsesLLMEnhancementWhenModelProvided() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

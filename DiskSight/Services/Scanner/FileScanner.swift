@@ -534,6 +534,7 @@ struct FileScanner {
                     // Calculate directory sizes
                     try await repository.calculateDirectorySizes()
 
+                    progress.completed = true
                     continuation.yield(progress)
                     continuation.finish()
                 } catch {

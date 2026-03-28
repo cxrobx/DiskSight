@@ -243,7 +243,15 @@ final class AppState: ObservableObject {
     @Published var cleanupSummary: CleanupSummary?
     @Published var cleanupProgress: ClassificationProgress?
     @Published var isAnalyzingCleanup: Bool = false
+    @Published var cleanupLLMProvider: CleanupLLMProvider = UserDefaults.standard.string(forKey: "cleanupLLMProvider")
+        .flatMap(CleanupLLMProvider.init(rawValue:)) ?? .ollama {
+        didSet {
+            UserDefaults.standard.set(cleanupLLMProvider.rawValue, forKey: "cleanupLLMProvider")
+        }
+    }
     @Published var isOllamaAvailable: Bool = false
+    @Published var isClaudeAvailable: Bool = false
+    @Published var claudeVersion: String?
     @Published var ollamaModels: [String] = []
     @Published var ollamaBaseURL: String = UserDefaults.standard.string(forKey: "ollamaURL") ?? "http://localhost:11434" {
         didSet {
@@ -253,6 +261,11 @@ final class AppState: ObservableObject {
     @Published var selectedOllamaModel: String = UserDefaults.standard.string(forKey: "ollamaModel") ?? "" {
         didSet {
             UserDefaults.standard.set(selectedOllamaModel, forKey: "ollamaModel")
+        }
+    }
+    @Published var selectedClaudeModel: String = UserDefaults.standard.string(forKey: "claudeModel") ?? "claude-sonnet-4-6" {
+        didSet {
+            UserDefaults.standard.set(selectedClaudeModel, forKey: "claudeModel")
         }
     }
 
@@ -307,6 +320,36 @@ final class AppState: ObservableObject {
     deinit {
         if let observer = terminationObserver {
             NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    var isSelectedLLMAvailable: Bool {
+        switch cleanupLLMProvider {
+        case .ollama:
+            return isOllamaAvailable
+        case .claudeHeadless:
+            return isClaudeAvailable
+        }
+    }
+
+    var selectedLLMModelName: String {
+        switch cleanupLLMProvider {
+        case .ollama:
+            return selectedOllamaModel
+        case .claudeHeadless:
+            return selectedClaudeModel
+        }
+    }
+
+    var selectedLLMStatusDescription: String {
+        switch cleanupLLMProvider {
+        case .ollama:
+            return isOllamaAvailable ? "Ollama available" : "Ollama unavailable"
+        case .claudeHeadless:
+            if let claudeVersion, !claudeVersion.isEmpty {
+                return "Claude CLI available (\(claudeVersion))"
+            }
+            return isClaudeAvailable ? "Claude CLI available" : "Claude CLI unavailable"
         }
     }
 
@@ -1104,14 +1147,51 @@ final class AppState: ObservableObject {
             // Clear previous recommendations
             try await fileRepository.deleteRecommendations(forSession: sessionId)
 
+            var llmService: CleanupLLMServing?
+            var llmModel: String?
+            if useLLM {
+                await refreshSelectedLLMStatus()
+
+                switch cleanupLLMProvider {
+                case .ollama:
+                    let model = selectedOllamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if isOllamaAvailable && !model.isEmpty {
+                        llmService = OllamaClient(baseURL: ollamaBaseURL)
+                        llmModel = model
+                    } else {
+                        recordActivity(
+                            level: .warning,
+                            title: "LLM Enhancement Disabled",
+                            message: "Ollama is not available. Smart Cleanup continued with rule-based analysis only.",
+                            source: "Smart Cleanup"
+                        )
+                    }
+                case .claudeHeadless:
+                    let model = selectedClaudeModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if isClaudeAvailable && !model.isEmpty {
+                        llmService = ClaudeCLIClient()
+                        llmModel = model
+                    } else {
+                        let message = isClaudeAvailable
+                            ? "No Claude model is configured. Smart Cleanup continued with rule-based analysis only."
+                            : "Claude CLI is not available. Smart Cleanup continued with rule-based analysis only."
+                        recordActivity(
+                            level: .warning,
+                            title: "LLM Enhancement Disabled",
+                            message: message,
+                            source: "Smart Cleanup"
+                        )
+                    }
+                }
+            }
+
             let service = SmartCleanupService(
                 classifier: FileClassifier(),
                 repository: fileRepository,
-                llmService: useLLM ? OllamaClient(baseURL: ollamaBaseURL) : nil
+                llmService: llmService
             )
 
             var allRecs: [CleanupRecommendation] = []
-            let llmModel = useLLM ? selectedOllamaModel : nil
             let stream = await service.analyze(sessionId: sessionId, llmModel: llmModel)
             for await (progress, recs) in stream {
                 cleanupProgress = progress
@@ -1153,9 +1233,37 @@ final class AppState: ObservableObject {
         cleanupProgress = nil
     }
 
+    func checkLLMStatus() async {
+        async let ollamaStatus = OllamaClient(baseURL: ollamaBaseURL).checkAvailability()
+        async let claudeStatus = ClaudeCLIClient().checkAvailability()
+        applyOllamaStatus(await ollamaStatus)
+        applyClaudeStatus(await claudeStatus)
+    }
+
     func checkOllamaStatus() async {
-        let client = OllamaClient(baseURL: ollamaBaseURL)
-        let status = await client.checkAvailability()
+        await refreshOllamaStatus()
+    }
+
+    private func refreshSelectedLLMStatus() async {
+        switch cleanupLLMProvider {
+        case .ollama:
+            await refreshOllamaStatus()
+        case .claudeHeadless:
+            await refreshClaudeStatus()
+        }
+    }
+
+    private func refreshOllamaStatus() async {
+        let status = await OllamaClient(baseURL: ollamaBaseURL).checkAvailability()
+        applyOllamaStatus(status)
+    }
+
+    private func refreshClaudeStatus() async {
+        let status = await ClaudeCLIClient().checkAvailability()
+        applyClaudeStatus(status)
+    }
+
+    private func applyOllamaStatus(_ status: OllamaStatus) {
         switch status {
         case .available(let models):
             isOllamaAvailable = true
@@ -1166,6 +1274,17 @@ final class AppState: ObservableObject {
         case .unavailable:
             isOllamaAvailable = false
             ollamaModels = []
+        }
+    }
+
+    private func applyClaudeStatus(_ status: ClaudeCLIStatus) {
+        switch status {
+        case .available(let version):
+            isClaudeAvailable = true
+            claudeVersion = version
+        case .unavailable:
+            isClaudeAvailable = false
+            claudeVersion = nil
         }
     }
 

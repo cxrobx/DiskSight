@@ -20,6 +20,10 @@ struct SmartCleanupView: View {
         appState.cleanupSummary ?? .empty
     }
 
+    private var selectedProviderStatusColor: Color {
+        appState.isSelectedLLMAvailable ? .green : .orange
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             headerBar
@@ -43,7 +47,10 @@ struct SmartCleanupView: View {
             if appState.cleanupRecommendations == nil && !appState.isAnalyzingCleanup {
                 await appState.loadSmartCleanup()
             }
-            await appState.checkOllamaStatus()
+            await appState.checkLLMStatus()
+        }
+        .onChange(of: appState.cleanupLLMProvider) { _, _ in
+            Task { await appState.checkLLMStatus() }
         }
         .alert("Move to Trash?", isPresented: $showConfirmTrash) {
             Button("Move to Trash", role: .destructive) {
@@ -75,12 +82,13 @@ struct SmartCleanupView: View {
                 HStack(spacing: 8) {
                     Text("Smart Cleanup")
                         .font(.headline)
-                    if appState.isOllamaAvailable {
-                        Circle()
-                            .fill(.green)
-                            .frame(width: 8, height: 8)
-                            .help("Ollama available")
-                    }
+                    Circle()
+                        .fill(selectedProviderStatusColor)
+                        .frame(width: 8, height: 8)
+                        .help(appState.selectedLLMStatusDescription)
+                    Text(appState.cleanupLLMProvider.shortLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 if let recs = appState.cleanupRecommendations, !recs.isEmpty {
                     Text("\(recs.count) recommendations | \(SizeFormatter.format(summary.totalReclaimable)) reclaimable")
@@ -91,13 +99,21 @@ struct SmartCleanupView: View {
 
             Spacer()
 
-            if appState.isOllamaAvailable {
-                Toggle("LLM", isOn: $llmEnabled)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .help("Use Ollama for enhanced explanations")
+            Toggle("LLM", isOn: $llmEnabled)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help(appState.cleanupLLMProvider.detail)
 
-                if llmEnabled && !appState.ollamaModels.isEmpty {
+            if llmEnabled {
+                Picker("", selection: $appState.cleanupLLMProvider) {
+                    ForEach(CleanupLLMProvider.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
+                    }
+                }
+                .frame(width: 130)
+                .controlSize(.small)
+
+                if appState.cleanupLLMProvider == .ollama, !appState.ollamaModels.isEmpty {
                     Picker("", selection: $appState.selectedOllamaModel) {
                         ForEach(appState.ollamaModels, id: \.self) { model in
                             Text(model).tag(model)
@@ -105,6 +121,13 @@ struct SmartCleanupView: View {
                     }
                     .frame(width: 140)
                     .controlSize(.small)
+                } else if appState.cleanupLLMProvider == .claudeHeadless {
+                    Text(appState.selectedClaudeModel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(width: 150, alignment: .leading)
+                        .help("Claude model: \(appState.selectedClaudeModel)")
                 }
             }
 

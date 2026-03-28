@@ -24,6 +24,7 @@
 		A100000000000000000000B8 /* OllamaClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B7 /* OllamaClient.swift */; };
 		A100000000000000000000BA /* SmartCleanupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B9 /* SmartCleanupService.swift */; };
 		A100000000000000000000BC /* SmartCleanupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000BB /* SmartCleanupView.swift */; };
+		A100000000000000000000C1 /* ClaudeCLIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000C0 /* ClaudeCLIClient.swift */; };
 		A695256D70C4C474057653FB /* SizeFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C95FFB0451C4ACA2F0F4E2C /* SizeFormatter.swift */; };
 		AA11BB22CC33DD44EE550002 /* TreemapLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550001 /* TreemapLayout.swift */; };
 		AA11BB22CC33DD44EE550004 /* TreemapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550003 /* TreemapView.swift */; };
@@ -55,6 +56,7 @@
 		FF66AA77BB88CC99DD000008 /* FileRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF66AA77BB88CC99DD000007 /* FileRowView.swift */; };
 		A20000000000000000000021 /* SmartCleanupServiceLLMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000022 /* SmartCleanupServiceLLMTests.swift */; };
 		A20000000000000000000029 /* CSVExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000028 /* CSVExporterTests.swift */; };
+		A2000000000000000000002B /* ManagedStorageExclusionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000002A /* ManagedStorageExclusionTests.swift */; };
 		A20000000000000000000025 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 17C54FA1597D67FCF5828176 /* GRDB */; };
 		A20000000000000000000026 /* xxHash-Swift in Frameworks */ = {isa = PBXBuildFile; productRef = 3DA1B721167DDD7A6A3C800A /* xxHash-Swift */; };
 		A20000000000000000000027 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = B20000000000000000000002 /* Sparkle */; };
@@ -87,8 +89,10 @@
 		A100000000000000000000B7 /* OllamaClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaClient.swift; sourceTree = "<group>"; };
 		A100000000000000000000B9 /* SmartCleanupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCleanupService.swift; sourceTree = "<group>"; };
 		A100000000000000000000BB /* SmartCleanupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCleanupView.swift; sourceTree = "<group>"; };
+		A100000000000000000000C0 /* ClaudeCLIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCLIClient.swift; sourceTree = "<group>"; };
 		A20000000000000000000022 /* SmartCleanupServiceLLMTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SmartCleanupServiceLLMTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000028 /* CSVExporterTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CSVExporterTests.swift; sourceTree = "<group>"; };
+		A2000000000000000000002A /* ManagedStorageExclusionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ManagedStorageExclusionTests.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550001 /* TreemapLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreemapLayout.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550003 /* TreemapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreemapView.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550005 /* VisualizationContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationContainer.swift; sourceTree = "<group>"; };
@@ -244,6 +248,7 @@
 		A100000000000000000000BD /* AI */ = {
 			isa = PBXGroup;
 			children = (
+				A100000000000000000000C0 /* ClaudeCLIClient.swift */,
 				A100000000000000000000B5 /* FileClassifier.swift */,
 				A100000000000000000000B7 /* OllamaClient.swift */,
 				A100000000000000000000B9 /* SmartCleanupService.swift */,
@@ -263,6 +268,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000028 /* CSVExporterTests.swift */,
+				A2000000000000000000002A /* ManagedStorageExclusionTests.swift */,
 				780D1B5C81EB6ACB1D978A82 /* SyncCompletionGatingTests.swift */,
 				A20000000000000000000022 /* SmartCleanupServiceLLMTests.swift */,
 			);
@@ -519,6 +525,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A20000000000000000000029 /* CSVExporterTests.swift in Sources */,
+				A2000000000000000000002B /* ManagedStorageExclusionTests.swift in Sources */,
 				276AB21C5D3C91F1C5E772EE /* SyncCompletionGatingTests.swift in Sources */,
 				A20000000000000000000021 /* SmartCleanupServiceLLMTests.swift in Sources */,
 			);
@@ -566,6 +573,7 @@
 				A100000000000000000000B8 /* OllamaClient.swift in Sources */,
 				A100000000000000000000BA /* SmartCleanupService.swift in Sources */,
 				A100000000000000000000BC /* SmartCleanupView.swift in Sources */,
+				A100000000000000000000C1 /* ClaudeCLIClient.swift in Sources */,
 				C2000000000000000000A002 /* GrowthFinder.swift in Sources */,
 				C2000000000000000000A004 /* GrowthView.swift in Sources */,
 			);
