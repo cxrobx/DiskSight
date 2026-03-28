@@ -24,7 +24,7 @@ actor SmartCleanupService {
         let classifier = self.classifier
         let repository = self.repository
         let llmService = self.llmService
-        let pageSize = 5000
+        let pageSize = 50_000
 
         return AsyncStream { continuation in
             Task {

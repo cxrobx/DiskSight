@@ -995,7 +995,8 @@ actor FileRepository {
 
     /// Cursor-based pagination: fetch files with id > afterId, ordered by id.
     /// O(1) per page regardless of position (vs OFFSET which is O(page_number)).
-    func nonDirectoryFilesAfter(id afterId: Int64, forSession sessionId: Int64, limit: Int) throws -> [FileNode] {
+    /// Nonisolated to avoid actor contention with FSEvents writes during analysis.
+    nonisolated func nonDirectoryFilesAfter(id afterId: Int64, forSession sessionId: Int64, limit: Int) throws -> [FileNode] {
         try database.dbPool.read { db in
             try FileNode
                 .filter(Column("scan_session_id") == sessionId)
