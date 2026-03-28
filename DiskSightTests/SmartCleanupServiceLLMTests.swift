@@ -45,7 +45,7 @@ final class SmartCleanupServiceLLMTests: XCTestCase {
         XCTAssertNil(environment["CLAUDE_PROJECT"])
     }
 
-    func testAnalyzeUsesLLMEnhancementWhenModelProvided() async throws {
+    func testAnalyzeFindsDirectoryByName() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
@@ -59,58 +59,45 @@ final class SmartCleanupServiceLLMTests: XCTestCase {
 
         let session = try await repository.createScanSession(rootPath: NSHomeDirectory())
         let sessionId = try XCTUnwrap(session.id)
-        let oldTimestamp = Date().addingTimeInterval(-(400 * 24 * 60 * 60)).timeIntervalSince1970
-        let filePath = NSHomeDirectory() + "/Library/Caches/com.example/app.log"
 
-        let file = FileNode(
+        // Insert a __pycache__ directory — should be matched by the SQL rule
+        let dirPath = NSHomeDirectory() + "/Projects/myapp/__pycache__"
+        let dir = FileNode(
             id: nil,
-            path: filePath,
-            name: "app.log",
-            parentPath: NSHomeDirectory() + "/Library/Caches/com.example",
-            size: 2_048,
-            isDirectory: false,
-            modifiedAt: oldTimestamp,
-            accessedAt: oldTimestamp,
-            createdAt: oldTimestamp,
+            path: dirPath,
+            name: "__pycache__",
+            parentPath: NSHomeDirectory() + "/Projects/myapp",
+            size: 50_000,
+            isDirectory: true,
+            modifiedAt: nil,
+            accessedAt: nil,
+            createdAt: nil,
             contentHash: nil,
             partialHash: nil,
             fileType: nil,
             scanSessionId: sessionId
         )
-        try await repository.insertFilesBatch([file])
+        try await repository.insertFilesBatch([dir])
 
-        let llmService = FakeLLMService(
-            responsesByPath: [
-                filePath: LLMFileAnalysis(
-                    filePath: filePath,
-                    category: nil,
-                    confidence: .risky,
-                    explanation: "Flagged by the test LLM"
-                )
-            ]
-        )
         let service = SmartCleanupService(
             classifier: FileClassifier(),
             repository: repository,
-            llmService: llmService
+            llmService: nil
         )
 
-        let stream = await service.analyze(sessionId: sessionId, llmModel: "test-model")
-        var latestRecommendations: [CleanupRecommendation] = []
-        for await (_, recommendations) in stream {
-            latestRecommendations = recommendations
+        let stream = await service.analyze(sessionId: sessionId, llmModel: nil)
+        var allRecs: [CleanupRecommendation] = []
+        for await (_, recs) in stream {
+            allRecs.append(contentsOf: recs)
         }
 
-        let recommendation = try XCTUnwrap(
-            latestRecommendations.first(where: { $0.filePath == filePath })
-        )
-        XCTAssertTrue(recommendation.llmEnhanced)
-        XCTAssertEqual(recommendation.explanation, "Flagged by the test LLM")
-        XCTAssertEqual(recommendation.confidence, .risky)
-        XCTAssertTrue(recommendation.signals.contains(.knownCache))
+        let recommendation = allRecs.first(where: { $0.filePath == dirPath })
+        XCTAssertNotNil(recommendation, "Should find __pycache__ directory")
+        XCTAssertEqual(recommendation?.category, .buildArtifact)
+        XCTAssertEqual(recommendation?.confidence, .safe)
     }
 
-    func testAnalyzeDoesNotMergeSignalsFromOtherSessions() async throws {
+    func testAnalyzeDoesNotMatchWrongSession() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
@@ -127,38 +114,24 @@ final class SmartCleanupServiceLLMTests: XCTestCase {
         let otherSession = try await repository.createScanSession(rootPath: NSHomeDirectory())
         let otherSessionId = try XCTUnwrap(otherSession.id)
 
-        let currentFilePath = tempDirectory.appendingPathComponent("Foo.class").path
-        let currentFile = FileNode(
+        // Insert node_modules in OTHER session only
+        let dirPath = NSHomeDirectory() + "/Projects/app/node_modules"
+        let dir = FileNode(
             id: nil,
-            path: currentFilePath,
-            name: "Foo.class",
-            parentPath: tempDirectory.path,
-            size: 4_096,
-            isDirectory: false,
+            path: dirPath,
+            name: "node_modules",
+            parentPath: NSHomeDirectory() + "/Projects/app",
+            size: 200_000_000,
+            isDirectory: true,
             modifiedAt: nil,
             accessedAt: nil,
             createdAt: nil,
-            contentHash: "shared-hash",
-            partialHash: nil,
-            fileType: nil,
-            scanSessionId: currentSessionId
-        )
-        let otherFile = FileNode(
-            id: nil,
-            path: tempDirectory.appendingPathComponent("Bar.class").path,
-            name: "Bar.class",
-            parentPath: tempDirectory.path,
-            size: 4_096,
-            isDirectory: false,
-            modifiedAt: nil,
-            accessedAt: nil,
-            createdAt: nil,
-            contentHash: "shared-hash",
+            contentHash: nil,
             partialHash: nil,
             fileType: nil,
             scanSessionId: otherSessionId
         )
-        try await repository.insertFilesBatch([currentFile, otherFile])
+        try await repository.insertFilesBatch([dir])
 
         let service = SmartCleanupService(
             classifier: FileClassifier(),
@@ -167,16 +140,11 @@ final class SmartCleanupServiceLLMTests: XCTestCase {
         )
 
         let stream = await service.analyze(sessionId: currentSessionId, llmModel: nil)
-        var latestRecommendations: [CleanupRecommendation] = []
-        for await (_, recommendations) in stream {
-            if !recommendations.isEmpty {
-                latestRecommendations = recommendations
-            }
+        var allRecs: [CleanupRecommendation] = []
+        for await (_, recs) in stream {
+            allRecs.append(contentsOf: recs)
         }
 
-        let recommendation = try XCTUnwrap(
-            latestRecommendations.first(where: { $0.filePath == currentFilePath })
-        )
-        XCTAssertFalse(recommendation.signals.contains(.duplicate))
+        XCTAssertTrue(allRecs.isEmpty, "Should not find directories from other sessions")
     }
 }

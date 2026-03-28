@@ -1008,6 +1008,49 @@ actor FileRepository {
         }
     }
 
+    /// Run a single cleanup rule as a SQL query, returning recommendations.
+    /// Nonisolated for performance — read-only query.
+    nonisolated func queryCleanupRule(
+        sessionId: Int64,
+        rule: String,
+        category: FileCategoryType,
+        confidence: DeletionConfidence,
+        explanation: String,
+        signals: [CleanupSignal],
+        condition: String,
+        isDirectoryRule: Bool
+    ) throws -> [CleanupRecommendation] {
+        try database.dbPool.read { db in
+            let sql = """
+                SELECT path, name, size, accessed_at, modified_at
+                FROM files
+                WHERE scan_session_id = ? AND \(condition)
+                """
+            let rows = try Row.fetchAll(db, sql: sql, arguments: [sessionId])
+            return rows.map { row in
+                let path: String = row["path"]
+                let name: String = row["name"]
+                let size: Int64 = row["size"]
+                let accessedAt: Double? = row["accessed_at"]
+                let modifiedAt: Double? = row["modified_at"]
+                return CleanupRecommendation(
+                    id: path,
+                    filePath: path,
+                    fileName: name,
+                    fileSize: size,
+                    category: category,
+                    confidence: confidence,
+                    explanation: "\(explanation) (\(rule))",
+                    signals: signals,
+                    llmEnhanced: false,
+                    scanSessionId: sessionId,
+                    accessedAt: accessedAt,
+                    modifiedAt: modifiedAt
+                )
+            }
+        }
+    }
+
     func insertRecommendations(_ records: [CleanupRecommendationRecord]) throws {
         try database.dbPool.write { db in
             for var record in records {
