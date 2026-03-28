@@ -243,6 +243,7 @@ final class AppState: ObservableObject {
     @Published var cleanupSummary: CleanupSummary?
     @Published var cleanupProgress: ClassificationProgress?
     @Published var isAnalyzingCleanup: Bool = false
+    var cleanupTask: Task<Void, Never>?
     @Published var cleanupLLMProvider: CleanupLLMProvider = UserDefaults.standard.string(forKey: "cleanupLLMProvider")
         .flatMap(CleanupLLMProvider.init(rawValue:)) ?? .ollama {
         didSet {
@@ -431,7 +432,7 @@ final class AppState: ObservableObject {
                 try? await fileRepository.deleteFilesFromPreviousSessions(currentSessionId: sessionId)
                 try? await fileRepository.deleteOldSessions(keepingId: sessionId)
                 try? await fileRepository.compactIfNeeded()
-                self.lastScanSession = try fileRepository.latestScanSession()
+                self.lastScanSession = try fileRepository.latestCompletedScanSession()
                 self.scanState = .completed
                 self.scheduleCacheWarmup()
                 self.scheduleGrowthWarmup()
@@ -517,21 +518,20 @@ final class AppState: ObservableObject {
                     let eventId = monitor.currentEventId
                     // Update in-memory session so handleBecameActive uses fresh event ID
                     self.lastScanSession?.lastFseventsId = Int64(eventId)
-                    Task {
+                    Task { [weak self] in
+                        guard let self else { return }
                         do {
                             try await self.fileRepository.updateEventId(
                                 sessionId: sessionId,
                                 eventId: Int64(eventId)
                             )
                         } catch {
-                            await MainActor.run {
-                                self.recordActivity(
-                                    level: .warning,
-                                    title: "Monitoring Position Was Not Saved",
-                                    message: "DiskSight updated live results, but could not persist the latest event marker. \(error.localizedDescription)",
-                                    source: "Monitoring"
-                                )
-                            }
+                            self.recordActivity(
+                                level: .warning,
+                                title: "Monitoring Position Was Not Saved",
+                                message: "DiskSight updated live results, but could not persist the latest event marker. \(error.localizedDescription)",
+                                source: "Monitoring"
+                            )
                         }
                     }
                 }
@@ -1194,6 +1194,7 @@ final class AppState: ObservableObject {
             var allRecs: [CleanupRecommendation] = []
             let stream = await service.analyze(sessionId: sessionId, llmModel: llmModel)
             for await (progress, recs) in stream {
+                guard !Task.isCancelled else { break }
                 cleanupProgress = progress
                 // The service yields batches, then optionally a full enhanced set at the end.
                 // If a yield contains all files (progress.processed == progress.total and
@@ -1231,6 +1232,12 @@ final class AppState: ObservableObject {
 
         isAnalyzingCleanup = false
         cleanupProgress = nil
+        cleanupTask = nil
+    }
+
+    func cancelSmartCleanup() {
+        cleanupTask?.cancel()
+        cleanupTask = nil
     }
 
     func checkLLMStatus() async {

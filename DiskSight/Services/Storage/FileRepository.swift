@@ -993,6 +993,20 @@ actor FileRepository {
         }
     }
 
+    /// Cursor-based pagination: fetch files with id > afterId, ordered by id.
+    /// O(1) per page regardless of position (vs OFFSET which is O(page_number)).
+    func nonDirectoryFilesAfter(id afterId: Int64, forSession sessionId: Int64, limit: Int) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("scan_session_id") == sessionId)
+                .filter(Column("is_directory") == false)
+                .filter(Column("id") > afterId)
+                .order(Column("id"))
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
     func insertRecommendations(_ records: [CleanupRecommendationRecord]) throws {
         try database.dbPool.write { db in
             for var record in records {

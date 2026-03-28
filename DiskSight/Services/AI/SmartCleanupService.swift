@@ -36,15 +36,19 @@ actor SmartCleanupService {
                         return
                     }
 
-                    // 2. Load + classify in pages — first results appear within seconds
+                    // 2. Load + classify in pages — cursor-based pagination (O(n) vs OFFSET O(n²))
                     var allRecs: [CleanupRecommendation] = []
                     var processedSoFar = 0
+                    var lastId: Int64 = 0
 
-                    for pageOffset in stride(from: 0, to: totalFiles, by: pageSize) {
-                        let page = try await repository.nonDirectoryFiles(
-                            forSession: sessionId, limit: pageSize, offset: pageOffset
+                    while processedSoFar < totalFiles {
+                        let page = try await repository.nonDirectoryFilesAfter(
+                            id: lastId, forSession: sessionId, limit: pageSize
                         )
                         guard !page.isEmpty else { break }
+                        if let lastFile = page.last, let fileId = lastFile.id {
+                            lastId = fileId
+                        }
 
                         // Classify this page synchronously (pure pattern matching, fast)
                         var pageRecs = await classifier.classifyBatch(

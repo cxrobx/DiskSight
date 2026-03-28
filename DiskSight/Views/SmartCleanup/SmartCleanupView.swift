@@ -24,6 +24,19 @@ struct SmartCleanupView: View {
         appState.isSelectedLLMAvailable ? .green : .orange
     }
 
+    private var selectedModelLabel: String {
+        switch appState.cleanupLLMProvider {
+        case .ollama:
+            return appState.selectedOllamaModel.isEmpty ? "Select Model" : appState.selectedOllamaModel
+        case .claudeHeadless:
+            let id = appState.selectedClaudeModel
+            if id.contains("haiku") { return "Claude Haiku" }
+            if id.contains("sonnet") { return "Claude Sonnet" }
+            if id.contains("opus") { return "Claude Opus" }
+            return id.isEmpty ? "Select Model" : id
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             headerBar
@@ -105,30 +118,68 @@ struct SmartCleanupView: View {
                 .help(appState.cleanupLLMProvider.detail)
 
             if llmEnabled {
-                Picker("", selection: $appState.cleanupLLMProvider) {
-                    ForEach(CleanupLLMProvider.allCases) { provider in
-                        Text(provider.displayName).tag(provider)
-                    }
-                }
-                .frame(width: 130)
-                .controlSize(.small)
-
-                if appState.cleanupLLMProvider == .ollama, !appState.ollamaModels.isEmpty {
-                    Picker("", selection: $appState.selectedOllamaModel) {
-                        ForEach(appState.ollamaModels, id: \.self) { model in
-                            Text(model).tag(model)
+                Menu {
+                    Text("Ollama (Local)").font(.caption)
+                    ForEach(appState.ollamaModels, id: \.self) { model in
+                        Button {
+                            appState.cleanupLLMProvider = .ollama
+                            appState.selectedOllamaModel = model
+                        } label: {
+                            if appState.cleanupLLMProvider == .ollama && appState.selectedOllamaModel == model {
+                                Label(model, systemImage: "checkmark")
+                            } else {
+                                Text(model)
+                            }
                         }
                     }
-                    .frame(width: 140)
-                    .controlSize(.small)
-                } else if appState.cleanupLLMProvider == .claudeHeadless {
-                    Text(appState.selectedClaudeModel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .frame(width: 150, alignment: .leading)
-                        .help("Claude model: \(appState.selectedClaudeModel)")
+
+                    Divider()
+
+                    Text("Claude (Headless)").font(.caption)
+                    Button {
+                        appState.cleanupLLMProvider = .claudeHeadless
+                        appState.selectedClaudeModel = "claude-haiku-4-5-20251001"
+                    } label: {
+                        if appState.cleanupLLMProvider == .claudeHeadless && appState.selectedClaudeModel.contains("haiku") {
+                            Label("Haiku", systemImage: "checkmark")
+                        } else {
+                            Text("Haiku")
+                        }
+                    }
+                    Button {
+                        appState.cleanupLLMProvider = .claudeHeadless
+                        appState.selectedClaudeModel = "claude-sonnet-4-6-20250514"
+                    } label: {
+                        if appState.cleanupLLMProvider == .claudeHeadless && appState.selectedClaudeModel.contains("sonnet") {
+                            Label("Sonnet", systemImage: "checkmark")
+                        } else {
+                            Text("Sonnet")
+                        }
+                    }
+                    Button {
+                        appState.cleanupLLMProvider = .claudeHeadless
+                        appState.selectedClaudeModel = "claude-opus-4-6-20250610"
+                    } label: {
+                        if appState.cleanupLLMProvider == .claudeHeadless && appState.selectedClaudeModel.contains("opus") {
+                            Label("Opus", systemImage: "checkmark")
+                        } else {
+                            Text("Opus")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(selectedModelLabel)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .imageScale(.small)
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
                 }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
 
             if summary.safeReclaimable > 0 {
@@ -142,13 +193,22 @@ struct SmartCleanupView: View {
                 .controlSize(.small)
             }
 
-            Button {
-                Task { await appState.runSmartCleanup(useLLM: llmEnabled) }
-            } label: {
-                Label("Analyze", systemImage: "wand.and.stars")
+            if appState.isAnalyzingCleanup {
+                Button {
+                    appState.cancelSmartCleanup()
+                } label: {
+                    Label("Cancel", systemImage: "xmark.circle")
+                }
+                .controlSize(.small)
+            } else {
+                Button {
+                    appState.cleanupTask = Task { await appState.runSmartCleanup(useLLM: llmEnabled) }
+                } label: {
+                    Label("Analyze", systemImage: "wand.and.stars")
+                }
+                .controlSize(.small)
+                .disabled(appState.lastScanSession == nil)
             }
-            .controlSize(.small)
-            .disabled(appState.isAnalyzingCleanup || appState.lastScanSession == nil)
         }
     }
 
@@ -199,7 +259,7 @@ struct SmartCleanupView: View {
                 .multilineTextAlignment(.center)
             if appState.lastScanSession != nil {
                 Button {
-                    Task { await appState.runSmartCleanup(useLLM: llmEnabled) }
+                    appState.cleanupTask = Task { await appState.runSmartCleanup(useLLM: llmEnabled) }
                 } label: {
                     Label("Analyze Now", systemImage: "wand.and.stars")
                 }

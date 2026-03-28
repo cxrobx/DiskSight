@@ -64,6 +64,7 @@ struct CleanupRecommendationRecord: Codable, FetchableRecord, PersistableRecord,
     var llmEnhanced: Bool
     var scanSessionId: Int64
     var createdAt: Double
+    var llmRaisedConfidence: Bool
 
     static let databaseTableName = "cleanup_recommendations"
 
@@ -79,6 +80,7 @@ struct CleanupRecommendationRecord: Codable, FetchableRecord, PersistableRecord,
         case llmEnhanced = "llm_enhanced"
         case scanSessionId = "scan_session_id"
         case createdAt = "created_at"
+        case llmRaisedConfidence = "llm_raised_confidence"
     }
 
     mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -105,7 +107,7 @@ struct CleanupRecommendationRecord: Codable, FetchableRecord, PersistableRecord,
             signals: decodedSignals,
             llmEnhanced: llmEnhanced,
             scanSessionId: scanSessionId,
-            llmRaisedConfidence: false
+            llmRaisedConfidence: llmRaisedConfidence
         )
     }
 
@@ -125,7 +127,8 @@ struct CleanupRecommendationRecord: Codable, FetchableRecord, PersistableRecord,
             signals: signalsJSON,
             llmEnhanced: rec.llmEnhanced,
             scanSessionId: rec.scanSessionId,
-            createdAt: Date().timeIntervalSince1970
+            createdAt: Date().timeIntervalSince1970,
+            llmRaisedConfidence: rec.llmRaisedConfidence
         )
     }
 }

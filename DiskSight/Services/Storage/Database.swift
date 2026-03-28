@@ -161,8 +161,9 @@ final class Database: Sendable {
     }
 
     private static func configureVacuumMode(on dbPool: DatabasePool) throws {
-        try dbPool.barrierWriteWithoutTransaction { db in
-            // Keep free pages reclaimable after large deletes such as scan-session cleanup.
+        try dbPool.write { db in
+            // auto_vacuum can only be set on a new database (before tables exist).
+            // On existing databases this is a harmless no-op.
             try db.execute(sql: "PRAGMA auto_vacuum = INCREMENTAL")
         }
     }
@@ -328,6 +329,12 @@ final class Database: Sendable {
                 on: "files",
                 columns: ["scan_session_id", "id"]
             )
+        }
+
+        migrator.registerMigration("v11_cleanup_llm_raised_confidence") { db in
+            try db.alter(table: "cleanup_recommendations") { t in
+                t.add(column: "llm_raised_confidence", .boolean).notNull().defaults(to: false)
+            }
         }
 
         return migrator
