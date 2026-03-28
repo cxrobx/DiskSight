@@ -1192,6 +1192,8 @@ final class AppState: ObservableObject {
             )
 
             var allRecs: [CleanupRecommendation] = []
+            var lastUIUpdate = 0
+            let uiUpdateInterval = 50_000 // Only push to SwiftUI every 50k files
             let stream = await service.analyze(sessionId: sessionId, llmModel: llmModel)
             for await (progress, recs) in stream {
                 guard !Task.isCancelled else { break }
@@ -1201,11 +1203,16 @@ final class AppState: ObservableObject {
                 // recs.count matches total so far), treat it as a replacement.
                 if progress.processed == progress.total && recs.count == allRecs.count {
                     allRecs = recs
+                    cleanupRecommendations = allRecs
                 } else {
                     allRecs.append(contentsOf: recs)
+                    // Throttle UI updates — pushing 1M+ items to @Published on every
+                    // 5k-file page causes SwiftUI to spend minutes diffing arrays.
+                    if progress.processed - lastUIUpdate >= uiUpdateInterval || progress.processed == progress.total {
+                        cleanupRecommendations = allRecs
+                        lastUIUpdate = progress.processed
+                    }
                 }
-                // Show partial results immediately
-                cleanupRecommendations = allRecs
             }
 
             // Persist to DB
