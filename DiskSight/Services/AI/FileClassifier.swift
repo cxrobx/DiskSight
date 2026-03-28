@@ -89,7 +89,8 @@ actor FileClassifier {
     }
 
     /// Classify a batch of files synchronously — used by SmartCleanupService for paginated processing.
-    func classifyBatch(files: [FileNode], sessionId: Int64) -> [CleanupRecommendation] {
+    /// Nonisolated because classification is pure computation (immutable rules, static classifyFile).
+    nonisolated func classifyBatch(files: [FileNode], sessionId: Int64) -> [CleanupRecommendation] {
         files.compactMap { file -> CleanupRecommendation? in
             guard let result = Self.classifyFile(file, rules: rules) else { return nil }
             return CleanupRecommendation(

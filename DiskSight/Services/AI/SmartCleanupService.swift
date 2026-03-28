@@ -4,7 +4,7 @@ import OSLog
 /// Orchestrates file classification by combining the deterministic rule engine
 /// with existing analysis signals (duplicates, stale, cache) and optional LLM enhancement.
 actor SmartCleanupService {
-    private let logger = Logger(subsystem: "com.disksight.app", category: "SmartCleanupService")
+    private static let logger = Logger(subsystem: "com.disksight.app", category: "SmartCleanupService")
     private let classifier: FileClassifier
     private let repository: FileRepository
     private let llmService: CleanupLLMServing?
@@ -27,7 +27,7 @@ actor SmartCleanupService {
         let pageSize = 50_000
 
         return AsyncStream { continuation in
-            Task {
+            Task.detached(priority: .userInitiated) {
                 do {
                     // 1. Get total count (fast — uses index)
                     let totalFiles = try await repository.nonDirectoryFileCount(forSession: sessionId)
@@ -116,7 +116,7 @@ actor SmartCleanupService {
                     // 4. If we have any cross-analysis signals, merge them and yield updated results
                     if !duplicatePaths.isEmpty || !stalePaths.isEmpty || !cachePaths.isEmpty {
                         let enhanced = allRecs.map { rec in
-                            self.mergeSignals(
+                            Self.mergeSignals(
                                 rec,
                                 isDuplicate: duplicatePaths.contains(rec.filePath),
                                 isStale: stalePaths.contains(rec.filePath),
@@ -132,7 +132,7 @@ actor SmartCleanupService {
                     }
 
                 } catch {
-                    logger.error("Smart cleanup analysis stream failed: \(error.localizedDescription, privacy: .public)")
+                    Self.logger.error("Smart cleanup analysis stream failed: \(error.localizedDescription, privacy: .public)")
                 }
                 continuation.finish()
             }
@@ -230,7 +230,7 @@ actor SmartCleanupService {
     }
 
     /// Merge cross-analysis signals into a recommendation, potentially boosting confidence.
-    private func mergeSignals(
+    private static func mergeSignals(
         _ rec: CleanupRecommendation,
         isDuplicate: Bool,
         isStale: Bool,
