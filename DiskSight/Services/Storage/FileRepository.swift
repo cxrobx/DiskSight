@@ -1051,7 +1051,7 @@ actor FileRepository {
         }
     }
 
-    func insertRecommendations(_ records: [CleanupRecommendationRecord]) throws {
+    nonisolated func insertRecommendations(_ records: [CleanupRecommendationRecord]) throws {
         try database.dbPool.write { db in
             for var record in records {
                 try record.insert(db)
@@ -1078,7 +1078,7 @@ actor FileRepository {
         }
     }
 
-    func deleteRecommendations(forSession sessionId: Int64) throws {
+    nonisolated func deleteRecommendations(forSession sessionId: Int64) throws {
         try database.dbPool.write { db in
             try db.execute(
                 sql: "DELETE FROM cleanup_recommendations WHERE scan_session_id = ?",
@@ -1102,7 +1102,7 @@ actor FileRepository {
         }
     }
 
-    func recommendationSummary(forSession sessionId: Int64) throws -> CleanupSummary {
+    nonisolated func recommendationSummary(forSession sessionId: Int64) throws -> CleanupSummary {
         try database.dbPool.read { db in
             // Total by confidence
             let confidenceRows = try Row.fetchAll(db, sql: """

@@ -1199,17 +1199,19 @@ final class AppState: ObservableObject {
                 }
             }
 
-            // Replace old recommendations in DB
-            try await fileRepository.deleteRecommendations(forSession: sessionId)
-            let records = allRecs.map { CleanupRecommendationRecord.from($0) }
-            let batchSize = 500
-            for batchStart in stride(from: 0, to: records.count, by: batchSize) {
-                let batchEnd = min(batchStart + batchSize, records.count)
-                try await fileRepository.insertRecommendations(Array(records[batchStart..<batchEnd]))
-            }
-
+            // Show results immediately, persist to DB in background
             cleanupRecommendations = allRecs
-            cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
+            cleanupSummary = CleanupSummary.fromRecommendations(allRecs)
+
+            let repo = fileRepository
+            Task.detached(priority: .utility) {
+                try? repo.deleteRecommendations(forSession: sessionId)
+                let records = allRecs.map { CleanupRecommendationRecord.from($0) }
+                for batchStart in stride(from: 0, to: records.count, by: 500) {
+                    let batchEnd = min(batchStart + 500, records.count)
+                    try? repo.insertRecommendations(Array(records[batchStart..<batchEnd]))
+                }
+            }
         } catch {
             logger.error("Smart cleanup failed: \(error.localizedDescription, privacy: .public)")
             presentAlert(

@@ -151,4 +151,29 @@ struct CleanupSummary {
         categoryBreakdown: [],
         totalCount: 0
     )
+
+    static func fromRecommendations(_ recs: [CleanupRecommendation]) -> CleanupSummary {
+        var safe: Int64 = 0, caution: Int64 = 0, risky: Int64 = 0
+        var categoryMap: [FileCategoryType: (size: Int64, count: Int)] = [:]
+        for rec in recs {
+            switch rec.confidence {
+            case .safe: safe += rec.fileSize
+            case .caution: caution += rec.fileSize
+            case .risky: risky += rec.fileSize
+            case .keep: break
+            }
+            let entry = categoryMap[rec.category, default: (size: 0, count: 0)]
+            categoryMap[rec.category] = (size: entry.size + rec.fileSize, count: entry.count + 1)
+        }
+        let breakdown = categoryMap.map { ($0.key, $0.value.size, $0.value.count) }
+            .sorted { $0.1 > $1.1 }
+        return CleanupSummary(
+            totalReclaimable: safe + caution + risky,
+            safeReclaimable: safe,
+            cautionReclaimable: caution,
+            riskyReclaimable: risky,
+            categoryBreakdown: breakdown,
+            totalCount: recs.count
+        )
+    }
 }
