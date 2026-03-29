@@ -1195,13 +1195,16 @@ final class AppState: ObservableObject {
                 cleanupProgress = progress
                 if !recs.isEmpty {
                     allRecs.append(contentsOf: recs)
-                    cleanupRecommendations = allRecs
                 }
             }
 
-            // Show results immediately, persist to DB in background
-            cleanupRecommendations = allRecs
+            // Summary uses all results; UI shows top 500 by size to avoid SwiftUI crash
             cleanupSummary = CleanupSummary.fromRecommendations(allRecs)
+            let displayRecs = Array(allRecs
+                .filter { $0.confidence != .keep }
+                .sorted { $0.fileSize > $1.fileSize }
+                .prefix(500))
+            cleanupRecommendations = displayRecs
 
             let repo = fileRepository
             Task.detached(priority: .utility) {
