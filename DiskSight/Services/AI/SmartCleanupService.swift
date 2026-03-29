@@ -167,23 +167,18 @@ actor SmartCleanupService {
             condition: "is_directory = 1 AND name = 'caches' AND path LIKE '%/.gradle/caches'",
             isDirectoryRule: true))
 
-        // --- Downloads (file-level) ---
-        r.append(SQLRule(name: "DMG installers", category: .download, confidence: .caution,
-            explanation: "Disk image installer — likely no longer needed after app install",
+        // --- Downloads (directory-level) ---
+        r.append(SQLRule(name: "Downloads folder", category: .download, confidence: .caution,
+            explanation: "Downloads folder — review for old installers and archives",
             signals: [.oldDownload],
-            condition: "is_directory = 0 AND name LIKE '%.dmg'",
-            isDirectoryRule: false))
-        r.append(SQLRule(name: "PKG installers", category: .download, confidence: .caution,
-            explanation: "Package installer — likely no longer needed after install",
-            signals: [.oldDownload],
-            condition: "is_directory = 0 AND name LIKE '%.pkg'",
-            isDirectoryRule: false))
+            condition: "is_directory = 1 AND name = 'Downloads' AND path LIKE '%/Users/%/Downloads'",
+            isDirectoryRule: true))
 
         // --- System Data (directory-level) ---
         r.append(SQLRule(name: "Xcode device support", category: .systemData, confidence: .caution,
             explanation: "iOS device symbols — needed for debugging specific iOS versions",
             signals: [],
-            condition: "is_directory = 1 AND name LIKE '%DeviceSupport' AND path LIKE '%/Xcode/%'",
+            condition: "is_directory = 1 AND name IN ('iOS DeviceSupport', 'watchOS DeviceSupport')",
             isDirectoryRule: true))
         r.append(SQLRule(name: "Xcode archives", category: .systemData, confidence: .caution,
             explanation: "Xcode app archives — needed for submissions and symbolication",
@@ -248,6 +243,10 @@ actor SmartCleanupService {
 
                 } catch {
                     Self.logger.error("Smart cleanup analysis failed: \(error.localizedDescription, privacy: .public)")
+                    continuation.yield((
+                        ClassificationProgress(processed: 0, total: 0, currentFile: "Analysis failed: \(error.localizedDescription)"),
+                        []
+                    ))
                 }
                 continuation.finish()
             }

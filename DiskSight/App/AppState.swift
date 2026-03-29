@@ -1144,9 +1144,6 @@ final class AppState: ObservableObject {
         cleanupProgress = ClassificationProgress(processed: 0, total: 0, currentFile: "Loading files...")
 
         do {
-            // Clear previous recommendations
-            try await fileRepository.deleteRecommendations(forSession: sessionId)
-
             var llmService: CleanupLLMServing?
             var llmModel: String?
             if useLLM {
@@ -1202,7 +1199,8 @@ final class AppState: ObservableObject {
                 }
             }
 
-            // Persist to DB
+            // Replace old recommendations in DB
+            try await fileRepository.deleteRecommendations(forSession: sessionId)
             let records = allRecs.map { CleanupRecommendationRecord.from($0) }
             let batchSize = 500
             for batchStart in stride(from: 0, to: records.count, by: batchSize) {
