@@ -185,10 +185,19 @@ struct FileScanner {
 
                             progress.currentPath = dirURL.lastPathComponent
                         } else {
-                            // UNCHANGED DIRECTORY: recurse via DB-known subdirectories only
+                            // UNCHANGED DIRECTORY: recurse via DB-known subdirectories.
+                            // Verify each subdirectory still exists — catches bulk deletions
+                            // that happened while the app was closed and weren't replayed
+                            // by FSEvents (journal wrap). deleteFilesRecursive handles
+                            // cascading descendant cleanup.
                             let subdirs = try repository.existingSubdirectoryPaths(parentPath: dirPath)
                             for subdirPath in subdirs {
-                                stack.append((URL(fileURLWithPath: subdirPath), false))
+                                if FileManager.default.fileExists(atPath: subdirPath) {
+                                    stack.append((URL(fileURLWithPath: subdirPath), false))
+                                } else {
+                                    deleteBatch.append(subdirPath)
+                                    affectedPaths.insert(subdirPath)
+                                }
                             }
                         }
 

@@ -344,6 +344,14 @@ final class Database: Sendable {
             )
         }
 
+        migrator.registerMigration("v13_drop_redundant_indexes") { db in
+            // idx_files_parent is a leftmost prefix of idx_files_parent_covering
+            try db.drop(index: "idx_files_parent")
+            // idx_files_session_directory is a leftmost prefix of both
+            // idx_files_session_size and idx_files_session_dir_name
+            try db.drop(index: "idx_files_session_directory")
+        }
+
         return migrator
     }
 }

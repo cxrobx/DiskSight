@@ -104,9 +104,14 @@ struct SmartCleanupView: View {
                         .foregroundStyle(.secondary)
                 }
                 if let recs = appState.cleanupRecommendations, !recs.isEmpty {
-                    Text("\(recs.count) recommendations | \(SizeFormatter.format(summary.totalReclaimable)) reclaimable")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text("\(recs.count) recommendations | \(SizeFormatter.format(summary.totalReclaimable)) reclaimable")
+                        if let analyzedAt = appState.cleanupAnalyzedAt {
+                            Text("| \(analyzedAt, style: .relative) ago")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -298,12 +303,42 @@ struct SmartCleanupView: View {
 
     private var recommendationsList: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            LazyVStack(spacing: 16) {
+                if appState.isCleanupStale {
+                    staleBanner
+                }
                 summaryBanner
                 categoryFilterBar
                 confidenceGroups
             }
             .padding(16)
+        }
+    }
+
+    // MARK: - Stale Banner
+
+    private var staleBanner: some View {
+        GroupBox {
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Results may be outdated")
+                        .font(.subheadline.bold())
+                    Text("Files have changed since the last analysis.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    appState.cleanupTask = Task { await appState.runSmartCleanup(useLLM: llmEnabled) }
+                } label: {
+                    Label("Re-analyze", systemImage: "arrow.clockwise")
+                }
+                .controlSize(.small)
+            }
+            .padding(4)
         }
     }
 
@@ -415,7 +450,14 @@ struct SmartCleanupView: View {
     }
 
     private func confidenceSection(confidence: DeletionConfidence, items: [CleanupRecommendation]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        Section {
+            ForEach(items, id: \.id) { rec in
+                RecommendationCard(recommendation: rec, safetyColor: colorForConfidence(rec.confidence)) {
+                    fileToTrash = rec
+                    showConfirmTrash = true
+                }
+            }
+        } header: {
             HStack {
                 Circle()
                     .fill(colorForConfidence(confidence))
@@ -425,13 +467,6 @@ struct SmartCleanupView: View {
                 Text("(\(items.count) files, \(SizeFormatter.format(items.reduce(0) { $0 + $1.fileSize })))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-
-            ForEach(items, id: \.id) { rec in
-                RecommendationCard(recommendation: rec, safetyColor: colorForConfidence(rec.confidence)) {
-                    fileToTrash = rec
-                    showConfirmTrash = true
-                }
             }
         }
     }

@@ -244,6 +244,11 @@ final class AppState: ObservableObject {
     @Published var cleanupProgress: ClassificationProgress?
     @Published var isAnalyzingCleanup: Bool = false
     var cleanupTask: Task<Void, Never>?
+    private var cleanupDataVersion: Int?
+    @Published var cleanupAnalyzedAt: Date?
+    var isCleanupStale: Bool {
+        cleanupRecommendations != nil && cleanupDataVersion != dataVersion
+    }
     @Published var cleanupLLMProvider: CleanupLLMProvider = UserDefaults.standard.string(forKey: "cleanupLLMProvider")
         .flatMap(CleanupLLMProvider.init(rawValue:)) ?? .ollama {
         didSet {
@@ -839,11 +844,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Reload overview data in-place without clearing first (prevents blank frame flicker)
     func refreshOverviewData() async {
-        overviewFileCount = nil
-        overviewTotalSize = nil
-        overviewTopFolders = nil
-        await loadOverviewData()
+        do {
+            if let session = lastScanSession, let sessionId = session.id {
+                overviewFileCount = try fileRepository.fileCount(sessionId: sessionId)
+                overviewTotalSize = try fileRepository.totalSize(sessionId: sessionId)
+                if let root = try fileRepository.rootNodeConcurrent() {
+                    overviewTopFolders = visibleFileNodes(try fileRepository.childrenWithSizesConcurrent(ofPath: root.path))
+                        .filter { $0.isDirectory }
+                        .prefix(10)
+                        .map { $0 }
+                }
+            }
+        } catch {
+            #if DEBUG
+            print("[AppState] refreshOverviewData error: \(error)")
+            #endif
+        }
     }
 
     func loadVisualizationRoot() async {
@@ -1189,6 +1207,8 @@ final class AppState: ObservableObject {
                 .sorted { $0.fileSize > $1.fileSize }
                 .prefix(500))
             cleanupRecommendations = displayRecs
+            cleanupDataVersion = dataVersion
+            cleanupAnalyzedAt = Date()
 
             // DB persist skipped — analysis completes in seconds so caching
             // across launches isn't needed, and 33k inserts cause SQLite writer
@@ -1482,9 +1502,9 @@ final class AppState: ObservableObject {
         preserveDetectedCaches: Bool = false,
         preserveCleanup: Bool = false
     ) {
-        overviewFileCount = nil
-        overviewTotalSize = nil
-        overviewTopFolders = nil
+        // overviewFileCount/overviewTotalSize/overviewTopFolders are NOT cleared here —
+        // clearing them causes a blank frame (Files: 0, Zero KB) before the reload completes.
+        // Instead, refreshOverviewData() replaces the data atomically.
         // vizChildNodes is NOT cleared here — clearing it causes a blank frame
         // because the view shows the empty state before the reload completes.
         // Instead, refreshVisualizationData() replaces the data atomically.
@@ -1504,6 +1524,8 @@ final class AppState: ObservableObject {
         if !preserveCleanup {
             cleanupRecommendations = nil
             cleanupSummary = nil
+            cleanupDataVersion = nil
+            cleanupAnalyzedAt = nil
         }
     }
 

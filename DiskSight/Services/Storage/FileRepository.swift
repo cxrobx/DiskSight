@@ -1027,12 +1027,25 @@ actor FileRepository {
                 WHERE scan_session_id = ? AND \(condition)
                 """
             let rows = try Row.fetchAll(db, sql: sql, arguments: [sessionId])
-            return rows.map { row in
+            let fm = FileManager.default
+            return rows.compactMap { row in
                 let path: String = row["path"]
+                guard fm.fileExists(atPath: path) else { return nil }
                 let name: String = row["name"]
-                let size: Int64 = row["size"]
+                let dbSize: Int64 = row["size"]
                 let accessedAt: Double? = row["accessed_at"]
                 let modifiedAt: Double? = row["modified_at"]
+
+                // For directories, compute actual size from filesystem instead of
+                // trusting the DB — stale records from missed FSEvents can inflate
+                // directory sizes by orders of magnitude.
+                let size: Int64
+                if isDirectoryRule {
+                    size = Self.actualDirectorySize(at: path, fm: fm)
+                } else {
+                    size = dbSize
+                }
+
                 return CleanupRecommendation(
                     id: path,
                     filePath: path,
@@ -1049,6 +1062,23 @@ actor FileRepository {
                 )
             }
         }
+    }
+
+    /// Walk a directory and sum actual file sizes on disk.
+    private static func actualDirectorySize(at path: String, fm: FileManager) -> Int64 {
+        let url = URL(fileURLWithPath: path)
+        guard let enumerator = fm.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                  values.isRegularFile == true else { continue }
+            total += Int64(values.fileSize ?? 0)
+        }
+        return total
     }
 
     nonisolated func insertRecommendations(_ records: [CleanupRecommendationRecord]) throws {
