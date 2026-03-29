@@ -507,7 +507,7 @@ final class AppState: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                self.invalidateCache()
+                self.invalidateCache(preserveCleanup: true)
                 self.dataVersion += 1
                 Task { await self.refreshVisualizationData() }
                 self.scheduleAutoGrowthRefresh()
