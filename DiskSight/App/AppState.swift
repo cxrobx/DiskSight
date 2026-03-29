@@ -512,7 +512,7 @@ final class AppState: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                self.invalidateCache(preserveCleanup: true)
+                self.invalidateCache(preserveDuplicateGroups: true, preserveStaleFiles: true, preserveDetectedCaches: true, preserveCleanup: true)
                 self.dataVersion += 1
                 Task { await self.refreshVisualizationData() }
                 self.scheduleAutoGrowthRefresh()
@@ -740,7 +740,7 @@ final class AppState: ObservableObject {
                 return
             }
 
-            self.invalidateCache()
+            self.invalidateCache(preserveDuplicateGroups: true, preserveStaleFiles: true, preserveDetectedCaches: true, preserveCleanup: true)
             self.dataVersion += 1
             await self.refreshVisualizationData()
             self.scheduleAutoGrowthRefresh()
@@ -1012,6 +1012,7 @@ final class AppState: ObservableObject {
 
     func loadStaleFiles(threshold: StaleThreshold) async {
         if staleFiles != nil && staleThreshold == threshold { return }
+        // Update threshold but keep old results visible until new data arrives
         staleThreshold = threshold
         let finder = StaleFinder(repository: fileRepository)
         do {
@@ -1755,7 +1756,7 @@ final class AppState: ObservableObject {
 
                 try await self.fileRepository.updateAncestorSizes(forPaths: Set([storagePath]))
                 try await self.fileRepository.refreshRootDirectorySize()
-                await self.refreshAfterIndexedFileMutation()
+                await self.refreshAfterIndexedFileMutation(preserveDuplicateGroups: true, preserveStaleFiles: true, preserveDetectedCaches: true, preserveCleanup: true)
                 try? await self.fileRepository.compactIfNeeded()
 
                 self.recordActivity(

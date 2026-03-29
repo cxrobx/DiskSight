@@ -39,10 +39,7 @@ struct StaleFilesView: View {
         }
         .onChange(of: appState.staleThreshold) {
             Task {
-                appState.staleFiles = nil
-                isLoading = true
                 await appState.loadStaleFiles(threshold: appState.staleThreshold)
-                isLoading = false
             }
         }
         .alert("Move to Trash?", isPresented: $showConfirmTrash) {
@@ -170,10 +167,8 @@ struct StaleFilesView: View {
             )
             guard result.deletedCount > 0 else { return }
 
-            await appState.refreshAfterIndexedFileMutation()
-            isLoading = true
+            await appState.refreshAfterIndexedFileMutation(preserveDetectedCaches: true, preserveCleanup: true)
             await appState.loadStaleFiles(threshold: appState.staleThreshold)
-            isLoading = false
         }
     }
 }

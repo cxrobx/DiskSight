@@ -518,7 +518,7 @@ actor FileRepository {
 
     // MARK: - Stale Files
 
-    func staleFiles(accessedBefore cutoff: Double, minSize: Int64 = 1_048_576) throws -> [FileNode] {
+    nonisolated func staleFiles(accessedBefore cutoff: Double, minSize: Int64 = 1_048_576) throws -> [FileNode] {
         try database.dbPool.read { db in
             try FileNode
                 .filter(Column("is_directory") == false)
@@ -575,6 +575,42 @@ actor FileRepository {
 
             let paths = previewRows.compactMap { $0["path"] as String? }
             return (paths, count, totalSize)
+        }
+    }
+
+    /// Fast directory-name-based cache detection. Uses idx_files_session_dir_name index
+    /// instead of full table LIKE scans. Returns matching directories with pre-computed sizes.
+    nonisolated func detectCacheDirectories(name: String) throws -> [(path: String, size: Int64)] {
+        try database.dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT path, size FROM files
+                WHERE name = ? AND is_directory = 1 AND size > 0
+                ORDER BY size DESC
+                """, arguments: [name])
+            return rows.map { (path: $0["path"] as String, size: $0["size"] as Int64) }
+        }
+    }
+
+    /// Fast prefix-path cache detection for patterns like ~/Library/Caches/*.
+    /// Uses idx_files_parent_covering index.
+    nonisolated func detectCacheChildren(parentPath: String) throws -> [(path: String, name: String, size: Int64)] {
+        try database.dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT path, name, size FROM files
+                WHERE parent_path = ? AND is_directory = 1 AND size > 0
+                ORDER BY size DESC
+                """, arguments: [parentPath])
+            return rows.map { (path: $0["path"] as String, name: $0["name"] as String, size: $0["size"] as Int64) }
+        }
+    }
+
+    /// Fast exact-path cache detection.
+    nonisolated func detectCacheExact(path: String) throws -> (path: String, size: Int64)? {
+        try database.dbPool.read { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT path, size FROM files WHERE path = ?
+                """, arguments: [path]) else { return nil }
+            return (path: row["path"] as String, size: row["size"] as Int64)
         }
     }
 

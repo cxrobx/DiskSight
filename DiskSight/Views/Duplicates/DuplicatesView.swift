@@ -187,7 +187,7 @@ struct DuplicatesView: View {
             )
             guard result.deletedCount > 0 else { return }
 
-            await appState.refreshAfterIndexedFileMutation()
+            await appState.refreshAfterIndexedFileMutation(preserveStaleFiles: true, preserveDetectedCaches: true, preserveCleanup: true)
             let finder = DuplicateFinder(repository: appState.fileRepository)
             do {
                 appState.duplicateGroups = try await finder.getDuplicateGroups()

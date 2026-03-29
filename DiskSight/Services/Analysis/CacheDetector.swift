@@ -77,16 +77,45 @@ actor CacheDetector {
         var results: [DetectedCache] = []
 
         for pattern in patterns {
-            let expandedPattern = expandPattern(pattern.pattern)
-            let (previewPaths, count, size) = try await findMatchingSummary(expandedPattern)
+            let expanded = expandPattern(pattern.pattern)
 
-            if count > 0 {
-                results.append(DetectedCache(
-                    pattern: pattern,
-                    previewPaths: previewPaths,
-                    matchCount: count,
-                    totalSize: size
-                ))
+            if expanded.hasPrefix("%") || expanded.contains("/%") {
+                // Wildcard pattern like **/node_modules → name-based index lookup
+                let name = URL(fileURLWithPath: expanded.replacingOccurrences(of: "%/", with: "/").replacingOccurrences(of: "%", with: "")).lastPathComponent
+                guard !name.isEmpty && name != "." else { continue }
+                let dirs = try repository.detectCacheDirectories(name: name)
+                if !dirs.isEmpty {
+                    let totalSize = dirs.reduce(0 as Int64) { $0 + $1.size }
+                    results.append(DetectedCache(
+                        pattern: pattern,
+                        previewPaths: dirs.prefix(20).map(\.path),
+                        matchCount: dirs.count,
+                        totalSize: totalSize
+                    ))
+                }
+            } else if expanded.hasSuffix("/*") {
+                // Children pattern like ~/Library/Caches/* → parent_path index lookup
+                let parentPath = String(expanded.dropLast(2))
+                let children = try repository.detectCacheChildren(parentPath: parentPath)
+                if !children.isEmpty {
+                    let totalSize = children.reduce(0 as Int64) { $0 + $1.size }
+                    results.append(DetectedCache(
+                        pattern: pattern,
+                        previewPaths: children.prefix(20).map(\.path),
+                        matchCount: children.count,
+                        totalSize: totalSize
+                    ))
+                }
+            } else {
+                // Exact path like ~/Library/Developer/Xcode/DerivedData
+                if let match = try repository.detectCacheExact(path: expanded) {
+                    results.append(DetectedCache(
+                        pattern: pattern,
+                        previewPaths: [match.path],
+                        matchCount: 1,
+                        totalSize: match.size
+                    ))
+                }
             }
         }
 

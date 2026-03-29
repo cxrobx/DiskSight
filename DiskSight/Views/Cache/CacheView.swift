@@ -201,7 +201,7 @@ struct CacheView: View {
                 let paths = try await detector.allMatchingPaths(for: cache.pattern)
                 let result = await appState.trashIndexedPaths(paths, actionName: "cleaning caches")
                 if result.deletedCount > 0 {
-                    await appState.refreshAfterIndexedFileMutation()
+                    await appState.refreshAfterIndexedFileMutation(preserveStaleFiles: true, preserveCleanup: true)
                     await detectCaches()
                 }
             } catch {
@@ -230,7 +230,7 @@ struct CacheView: View {
                     actionName: "cleaning caches"
                 )
                 if result.deletedCount > 0 {
-                    await appState.refreshAfterIndexedFileMutation()
+                    await appState.refreshAfterIndexedFileMutation(preserveStaleFiles: true, preserveCleanup: true)
                     await detectCaches()
                 }
             } catch {
