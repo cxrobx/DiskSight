@@ -1116,24 +1116,8 @@ final class AppState: ObservableObject {
     // MARK: - Smart Cleanup
 
     func loadSmartCleanup() async {
-        guard cleanupRecommendations == nil else { return }
-        guard let session = lastScanSession, let sessionId = session.id else { return }
-        do {
-            let records = try await fileRepository.recommendations(forSession: sessionId)
-            guard !records.isEmpty else { return } // Leave nil so view shows "Analyze" prompt
-            cleanupRecommendations = records.map { $0.toRecommendation() }
-            cleanupSummary = try await fileRepository.recommendationSummary(forSession: sessionId)
-        } catch {
-            recordActivity(
-                level: .warning,
-                title: "Could Not Load Cleanup Recommendations",
-                message: error.localizedDescription,
-                source: "Smart Cleanup"
-            )
-            #if DEBUG
-            print("[AppState] loadSmartCleanup error: \(error)")
-            #endif
-        }
+        // No-op — results are computed on demand (analysis takes seconds)
+        // and kept in memory. No DB caching needed.
     }
 
     func runSmartCleanup(useLLM: Bool = false) async {
@@ -1206,15 +1190,9 @@ final class AppState: ObservableObject {
                 .prefix(500))
             cleanupRecommendations = displayRecs
 
-            let repo = fileRepository
-            Task.detached(priority: .utility) {
-                try? repo.deleteRecommendations(forSession: sessionId)
-                let records = allRecs.map { CleanupRecommendationRecord.from($0) }
-                for batchStart in stride(from: 0, to: records.count, by: 500) {
-                    let batchEnd = min(batchStart + 500, records.count)
-                    try? repo.insertRecommendations(Array(records[batchStart..<batchEnd]))
-                }
-            }
+            // DB persist skipped — analysis completes in seconds so caching
+            // across launches isn't needed, and 33k inserts cause SQLite writer
+            // contention with FSEvents that beachballs the app.
         } catch {
             logger.error("Smart cleanup failed: \(error.localizedDescription, privacy: .public)")
             presentAlert(
