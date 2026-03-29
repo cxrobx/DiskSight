@@ -336,6 +336,14 @@ final class Database: Sendable {
             }
         }
 
+        migrator.registerMigration("v12_cleanup_dir_name_index") { db in
+            try db.create(
+                index: "idx_files_session_dir_name",
+                on: "files",
+                columns: ["scan_session_id", "is_directory", "name"]
+            )
+        }
+
         return migrator
     }
 }
