@@ -88,6 +88,9 @@ final class FSEventsMonitor: @unchecked Sendable {
             if repository.isManagedStoragePath(path) {
                 continue
             }
+            if let monitoredPath, IndexedPathRules.shouldExcludeDuringRootScan(path: path, scanRootPath: monitoredPath) {
+                continue
+            }
             filteredPaths.append(path)
             filteredFlags.append(flags[index])
             filteredIDs.append(ids[index])

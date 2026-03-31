@@ -136,6 +136,29 @@ final class AppState: ObservableObject {
         return threshold
     }
 
+    nonisolated static func growthFolderExists(at path: String) -> Bool {
+        let normalizedPath = IndexedPathRules.normalizedPath(path)
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: normalizedPath, isDirectory: &isDirectory)
+        return exists && isDirectory.boolValue
+    }
+
+    nonisolated static func shouldDisplayGrowthFolder(
+        at path: String,
+        exists: (String) -> Bool = { AppState.growthFolderExists(at: $0) }
+    ) -> Bool {
+        let normalizedPath = IndexedPathRules.normalizedPath(path)
+        guard !IndexedPathRules.isPseudoFilesystemPath(normalizedPath) else { return false }
+        return exists(normalizedPath)
+    }
+
+    nonisolated static func sanitizeGrowthFolders(
+        _ folders: [FolderGrowth],
+        exists: (String) -> Bool = { AppState.growthFolderExists(at: $0) }
+    ) -> [FolderGrowth] {
+        folders.filter { shouldDisplayGrowthFolder(at: $0.folderPath, exists: exists) }
+    }
+
     private enum SyncTrigger {
         case manualRefresh
         case monitorReplayGap
@@ -630,6 +653,7 @@ final class AppState: ObservableObject {
     /// is detected or when the saved event ID is likely stale.
     private func triggerQuickRescan() {
         guard let rootPath = scanRootPath else { return }
+        guard !isSyncing else { return }
         // Skip if session is very fresh — FSEvents will catch any changes going forward.
         // MustScanSubDirs during initial replay doesn't mean data is stale; it just means
         // the kernel can't guarantee individual event paths.
@@ -1562,13 +1586,24 @@ final class AppState: ObservableObject {
 
     private func cachedGrowthPeriod(_ period: GrowthPeriod) async -> [FolderGrowth]? {
         if let cached = growthCache[period] {
-            return cached
+            let sanitized = Self.sanitizeGrowthFolders(cached)
+            if sanitized.count != cached.count {
+                growthCache[period] = sanitized
+                if let sessionId = lastScanSession?.id {
+                    persistGrowthCache(sanitized, sessionId: sessionId, period: period)
+                }
+            }
+            return sanitized
         }
 
         if let sessionId = lastScanSession?.id,
            let persisted = await persistedGrowthCache(sessionId: sessionId, period: period) {
-            growthCache[period] = persisted
-            return persisted
+            let sanitized = Self.sanitizeGrowthFolders(persisted)
+            growthCache[period] = sanitized
+            if sanitized.count != persisted.count {
+                persistGrowthCache(sanitized, sessionId: sessionId, period: period)
+            }
+            return sanitized
         }
 
         return nil
@@ -1598,7 +1633,7 @@ final class AppState: ObservableObject {
             }
         }
 
-        let results = await queryGrowthFolders(period: period)
+        let results = Self.sanitizeGrowthFolders(await queryGrowthFolders(period: period))
         growthCache[period] = results
         if let sessionId = lastScanSession?.id {
             persistGrowthCache(results, sessionId: sessionId, period: period)
@@ -1724,6 +1759,9 @@ final class AppState: ObservableObject {
         if fileRepository.isManagedStoragePath(path) {
             return false
         }
+        if IndexedPathRules.isPseudoFilesystemPath(path) {
+            return false
+        }
         guard hideExternalDrives else { return true }
         if path == "/Volumes" { return false }
         return !path.hasPrefix("/Volumes/")
@@ -1734,7 +1772,7 @@ final class AppState: ObservableObject {
     }
 
     private func visibleGrowthFolders(_ folders: [FolderGrowth]) -> [FolderGrowth] {
-        folders.filter { shouldIncludePath($0.folderPath) }
+        Self.sanitizeGrowthFolders(folders).filter { shouldIncludePath($0.folderPath) }
     }
 
     private func sanitizeManagedStorageIfNeeded() {

@@ -74,6 +74,9 @@ struct FileScanner {
                         if repository.isManagedStoragePath(dirPath) {
                             continue
                         }
+                        if IndexedPathRules.shouldExcludeDuringRootScan(path: dirPath, scanRootPath: rootURL.path) {
+                            continue
+                        }
 
                         // Get directory mtime
                         let dirValues = try? dirURL.resourceValues(forKeys: [.contentModificationDateKey, .isSymbolicLinkKey])
@@ -111,6 +114,10 @@ struct FileScanner {
                                 let modifiedAt = values.contentModificationDate?.timeIntervalSince1970
 
                                 if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                                    fsChildPaths.remove(path)
+                                    continue
+                                }
+                                if IndexedPathRules.shouldExcludeDuringRootScan(path: path, scanRootPath: rootURL.path) {
                                     fsChildPaths.remove(path)
                                     continue
                                 }
@@ -283,6 +290,9 @@ struct FileScanner {
                         if repository.isManagedStoragePath(dirPath) {
                             continue
                         }
+                        if IndexedPathRules.shouldExcludeDuringRootScan(path: dirPath, scanRootPath: rootURL.path) {
+                            continue
+                        }
 
                         // Skip symbolic links
                         let dirValues = try? dirURL.resourceValues(forKeys: [.isSymbolicLinkKey])
@@ -313,6 +323,10 @@ struct FileScanner {
                             let modifiedAt = values.contentModificationDate?.timeIntervalSince1970
 
                             if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                                fsChildPaths.remove(path)
+                                continue
+                            }
+                            if IndexedPathRules.shouldExcludeDuringRootScan(path: path, scanRootPath: rootURL.path) {
                                 fsChildPaths.remove(path)
                                 continue
                             }
@@ -492,6 +506,12 @@ struct FileScanner {
                         }
                         let isDir = values.isDirectory ?? false
                         if shouldExcludeExternalVolume(url: fileURL, isDirectory: isDir, rootURL: rootURL, values: values) {
+                            if isDir {
+                                enumerator.skipDescendants()
+                            }
+                            continue
+                        }
+                        if IndexedPathRules.shouldExcludeDuringRootScan(path: fileURL.path, scanRootPath: rootURL.path) {
                             if isDir {
                                 enumerator.skipDescendants()
                             }
