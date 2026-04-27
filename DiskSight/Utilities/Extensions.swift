@@ -1,7 +1,7 @@
 import Foundation
 
 enum IndexedPathRules {
-    private static let pseudoFilesystemRoots = ["/dev"]
+    private static let pseudoFilesystemRoots = ["/dev", "/.vol"]
 
     static func normalizedPath(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.path

@@ -166,7 +166,7 @@ final class FSEventsMonitor: @unchecked Sendable {
             var requiresRescan = false
 
             let resourceKeys: Set<URLResourceKey> = [
-                .fileSizeKey, .isDirectoryKey, .isRegularFileKey,
+                .fileSizeKey, .totalFileAllocatedSizeKey, .isDirectoryKey, .isRegularFileKey,
                 .contentModificationDateKey, .contentAccessDateKey,
                 .creationDateKey, .typeIdentifierKey, .isSymbolicLinkKey
             ]
@@ -199,7 +199,7 @@ final class FSEventsMonitor: @unchecked Sendable {
                         path: path,
                         name: url.lastPathComponent,
                         parentPath: path == "/" ? nil : url.deletingLastPathComponent().path,
-                        size: Int64(values.fileSize ?? 0),
+                        size: Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0),
                         isDirectory: isDirectory,
                         modifiedAt: values.contentModificationDate?.timeIntervalSince1970,
                         accessedAt: values.contentAccessDate?.timeIntervalSince1970,
@@ -224,6 +224,7 @@ final class FSEventsMonitor: @unchecked Sendable {
                 return
             }
 
+            let hadDeletes = !recursiveDeletePaths.isEmpty || !deletePaths.isEmpty
             do {
                 // Batch DB operations (single DELETE query per 500 instead of N individual calls)
                 if !recursiveDeletePaths.isEmpty {
@@ -273,6 +274,13 @@ final class FSEventsMonitor: @unchecked Sendable {
                         source: "Monitoring"
                     )
                 )
+            }
+
+            // Reclaim free pages when a batch removed rows. compactIfNeeded() is gated by
+            // its own thresholds (≥64 MB free pages or ≥20% free ratio) so this is a no-op
+            // when there's nothing meaningful to reclaim.
+            if hadDeletes {
+                _ = try? await repository.compactIfNeeded()
             }
 
             // Signal batch complete — AppState subscribes to this for cache invalidation

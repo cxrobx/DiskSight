@@ -28,6 +28,13 @@ struct SettingsView: View {
     @State private var providerTestSucceeded = false
     @State private var isTesting = false
 
+    private var byteCountFormatter: ByteCountFormatter {
+        let f = ByteCountFormatter()
+        f.countStyle = .binary
+        f.allowedUnits = [.useAll]
+        return f
+    }
+
     var body: some View {
         Form {
             Section("Appearance") {
@@ -111,6 +118,31 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Storage") {
+                LabeledContent("Database size", value: byteCountFormatter.string(fromByteCount: appState.databaseSizeBytes))
+                LabeledContent("Reclaimable", value: byteCountFormatter.string(fromByteCount: appState.databaseFreeBytes))
+
+                HStack {
+                    Button {
+                        Task { await appState.compactDatabase() }
+                    } label: {
+                        if appState.isCompactingDatabase {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Compact Now")
+                        }
+                    }
+                    .disabled(appState.isCompactingDatabase || appState.databaseFreeBytes < 1_000_000)
+
+                    Spacer()
+                }
+
+                Text("Compaction rewrites the index to release unused space. Runs automatically after large deletions; this button forces it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("About") {
                 LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")
                 LabeledContent("Build", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")
@@ -132,9 +164,16 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 450, height: 560)
+        .frame(width: 450, height: 620)
         .task {
             await appState.checkLLMStatus()
+            await appState.refreshDatabaseStats()
+        }
+        .onAppear {
+            Task { await appState.refreshDatabaseStats() }
+        }
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+            Task { await appState.refreshDatabaseStats() }
         }
         .onChange(of: appState.cleanupLLMProvider) { _, _ in
             providerTestResult = nil

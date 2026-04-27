@@ -17,6 +17,24 @@ actor FileRepository {
         Database.isManagedStoragePath(path, databaseURL: database.databaseURL)
     }
 
+    /// Bytes used on disk by the SQLite triplet (.sqlite + -wal + -shm).
+    nonisolated func databaseFileSizeBytes() -> Int64 {
+        let basePath = database.databaseURL.path
+        return [basePath, basePath + "-wal", basePath + "-shm"]
+            .compactMap { try? FileManager.default.attributesOfItem(atPath: $0)[.size] as? NSNumber }
+            .map { $0.int64Value }
+            .reduce(0, +)
+    }
+
+    /// Bytes that VACUUM could currently reclaim (free pages × page size).
+    nonisolated func databaseFreeBytes() throws -> Int64 {
+        try database.dbPool.read { db in
+            let pageSize = Int64(try Int.fetchOne(db, sql: "PRAGMA page_size") ?? 0)
+            let freelistCount = Int64(try Int.fetchOne(db, sql: "PRAGMA freelist_count") ?? 0)
+            return pageSize * freelistCount
+        }
+    }
+
     // MARK: - Scan Sessions
 
     func createScanSession(rootPath: String) throws -> ScanSession {
@@ -853,6 +871,76 @@ actor FileRepository {
         }
     }
 
+    // MARK: - Path Existence Sweep
+
+    struct PruneCandidate {
+        let id: Int64
+        let path: String
+        let size: Int64
+        let isDirectory: Bool
+    }
+
+    /// Read-only chunked iteration over files in a session, ordered by id, for the
+    /// background sweep. Nonisolated so the sweep doesn't serialize with FSEvents
+    /// writes (gotcha #26).
+    nonisolated func pruneCandidates(
+        sessionId: Int64,
+        afterId: Int64,
+        limit: Int = 5000
+    ) throws -> [PruneCandidate] {
+        try database.dbPool.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT id, path, size, is_directory
+                FROM files
+                WHERE scan_session_id = ? AND id > ?
+                ORDER BY id
+                LIMIT ?
+                """, arguments: [sessionId, afterId, limit])
+                .map { row in
+                    PruneCandidate(
+                        id: row["id"],
+                        path: row["path"],
+                        size: row["size"],
+                        isDirectory: row["is_directory"]
+                    )
+                }
+        }
+    }
+
+    /// Apply one batch of sweep results: delete missing rows, update divergent file
+    /// sizes, return the parent paths that need ancestor recomputation. Caller is
+    /// responsible for invoking `updateAncestorSizes(forPaths:)` once all batches
+    /// are processed (lets a single recompute pass cover the whole sweep).
+    func applyPruneSweepBatch(
+        missingPaths: [String],
+        sizeUpdates: [(path: String, size: Int64)]
+    ) throws -> Set<String> {
+        var dirtyParents = Set<String>()
+        for path in missingPaths {
+            let parent = (path as NSString).deletingLastPathComponent
+            if !parent.isEmpty { dirtyParents.insert(parent) }
+        }
+        for (path, _) in sizeUpdates {
+            let parent = (path as NSString).deletingLastPathComponent
+            if !parent.isEmpty { dirtyParents.insert(parent) }
+        }
+
+        if !missingPaths.isEmpty {
+            try deleteFiles(paths: missingPaths)
+        }
+        if !sizeUpdates.isEmpty {
+            try database.dbPool.write { db in
+                for (path, size) in sizeUpdates {
+                    try db.execute(
+                        sql: "UPDATE files SET size = ? WHERE path = ?",
+                        arguments: [size, path]
+                    )
+                }
+            }
+        }
+        return dirtyParents
+    }
+
     // MARK: - Export
 
     func allFiles(forSession sessionId: Int64) throws -> [FileNode] {
@@ -1066,6 +1154,7 @@ actor FileRepository {
             let fm = FileManager.default
             return rows.compactMap { row in
                 let path: String = row["path"]
+                guard !IndexedPathRules.isPseudoFilesystemPath(path) else { return nil }
                 guard fm.fileExists(atPath: path) else { return nil }
                 let name: String = row["name"]
                 let dbSize: Int64 = row["size"]
@@ -1100,19 +1189,20 @@ actor FileRepository {
         }
     }
 
-    /// Walk a directory and sum actual file sizes on disk.
+    /// Walk a directory and sum actual on-disk allocated sizes.
     private static func actualDirectorySize(at path: String, fm: FileManager) -> Int64 {
         let url = URL(fileURLWithPath: path)
+        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey]
         guard let enumerator = fm.enumerator(
             at: url,
-            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            includingPropertiesForKeys: keys,
             options: [.skipsHiddenFiles]
         ) else { return 0 }
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
                   values.isRegularFile == true else { continue }
-            total += Int64(values.fileSize ?? 0)
+            total += Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
         }
         return total
     }

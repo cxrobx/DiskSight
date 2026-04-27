@@ -298,6 +298,11 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Database storage stats (Settings → Storage)
+    @Published var databaseSizeBytes: Int64 = 0
+    @Published var databaseFreeBytes: Int64 = 0
+    @Published var isCompactingDatabase: Bool = false
+
     private var scanTask: Task<Void, Never>?
     private var incrementalSyncTask: Task<Void, Never>?
     private var cachePrefetchTask: Task<Void, Never>?
@@ -313,6 +318,7 @@ final class AppState: ObservableObject {
     private var rescanCancellable: AnyCancellable?
     private var monitorIssueCancellable: AnyCancellable?
     private var terminationObserver: Any?
+    private var pathSweepTask: Task<Void, Never>?
 
     init() {
         self.database = Database.shared
@@ -321,6 +327,7 @@ final class AppState: ObservableObject {
         if !Self.isRunningTests {
             checkFullDiskAccess()
             loadLastSession()
+            purgePseudoFilesystemPathsIfNeeded()
             scheduleCacheWarmup()
             scheduleGrowthWarmup()
         }
@@ -769,6 +776,7 @@ final class AppState: ObservableObject {
             await self.refreshVisualizationData()
             self.scheduleAutoGrowthRefresh()
             self.isSyncing = false
+            self.schedulePathSweepIfNeeded()
         }
     }
 
@@ -1454,6 +1462,7 @@ final class AppState: ObservableObject {
                     source: "Index"
                 )
             }
+            _ = try? await fileRepository.compactIfNeeded()
         }
 
         if !failures.isEmpty {
@@ -1519,6 +1528,39 @@ final class AppState: ObservableObject {
         dataVersion += 1
         await refreshVisualizationData()
         scheduleAutoGrowthRefresh()
+    }
+
+    // MARK: - Database storage maintenance
+
+    func refreshDatabaseStats() async {
+        let size = fileRepository.databaseFileSizeBytes()
+        let free = (try? fileRepository.databaseFreeBytes()) ?? 0
+        databaseSizeBytes = size
+        databaseFreeBytes = free
+    }
+
+    func compactDatabase() async {
+        guard !isCompactingDatabase else { return }
+        isCompactingDatabase = true
+        defer { isCompactingDatabase = false }
+
+        do {
+            _ = try await fileRepository.compactIfNeeded(
+                minimumFreeBytes: 0,
+                minimumFreeRatio: 0,
+                minimumWALBytes: 0
+            )
+        } catch {
+            logger.error("Manual compact failed: \(error.localizedDescription, privacy: .public)")
+            presentAlert(
+                title: "Compact Failed",
+                message: "DiskSight could not compact its database. \(error.localizedDescription)",
+                level: .warning,
+                source: "Storage"
+            )
+        }
+
+        await refreshDatabaseStats()
     }
 
     func invalidateCache(
@@ -1773,6 +1815,141 @@ final class AppState: ObservableObject {
 
     private func visibleGrowthFolders(_ folders: [FolderGrowth]) -> [FolderGrowth] {
         Self.sanitizeGrowthFolders(folders).filter { shouldIncludePath($0.folderPath) }
+    }
+
+    private static let pseudoFsPurgeFlag = "pseudoFsPurgeV1Done"
+    private static let lastPathSweepKey = "lastPathSweepAt"
+    private static let pathSweepCooldown: TimeInterval = 24 * 60 * 60
+    private static let sweepResourceKeys: Set<URLResourceKey> = [
+        .totalFileAllocatedSizeKey,
+        .fileSizeKey,
+        .isRegularFileKey
+    ]
+
+    private func schedulePathSweepIfNeeded() {
+        guard !Self.isRunningTests else { return }
+        guard let session = lastScanSession, let sessionId = session.id else { return }
+
+        let lastRun = UserDefaults.standard.double(forKey: Self.lastPathSweepKey)
+        let now = Date().timeIntervalSince1970
+        if lastRun > 0 && (now - lastRun) < Self.pathSweepCooldown { return }
+
+        if let existing = pathSweepTask, !existing.isCancelled { return }
+
+        pathSweepTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.runPathSweep(sessionId: sessionId)
+            self.pathSweepTask = nil
+        }
+    }
+
+    private func runPathSweep(sessionId: Int64) async {
+        let fm = FileManager.default
+        var afterId: Int64 = 0
+        var totalDeleted = 0
+        var totalUpdated = 0
+        var dirtyParents = Set<String>()
+
+        defer {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastPathSweepKey)
+        }
+
+        while !Task.isCancelled {
+            // Yield if a scan or active sync starts mid-sweep — they take priority.
+            if case .scanning = scanState { return }
+            if isSyncing { return }
+
+            let candidates: [FileRepository.PruneCandidate]
+            do {
+                candidates = try fileRepository.pruneCandidates(sessionId: sessionId, afterId: afterId, limit: 5000)
+            } catch {
+                logger.error("Path sweep query failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            if candidates.isEmpty { break }
+            afterId = candidates.last?.id ?? afterId
+
+            var missing: [String] = []
+            var sizeUpdates: [(path: String, size: Int64)] = []
+
+            for candidate in candidates {
+                if Task.isCancelled { return }
+                let url = URL(fileURLWithPath: candidate.path)
+                let values = try? url.resourceValues(forKeys: Self.sweepResourceKeys)
+                guard let values else {
+                    missing.append(candidate.path)
+                    continue
+                }
+                if candidate.isDirectory { continue }
+                let actual = Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
+                let diff = abs(actual - candidate.size)
+                let oneMB: Int64 = 1_048_576
+                let onePercent = max(candidate.size / 100, 1)
+                if diff > oneMB || diff > onePercent {
+                    sizeUpdates.append((path: candidate.path, size: actual))
+                }
+            }
+
+            if missing.isEmpty && sizeUpdates.isEmpty { continue }
+
+            do {
+                let parents = try await fileRepository.applyPruneSweepBatch(
+                    missingPaths: missing,
+                    sizeUpdates: sizeUpdates
+                )
+                totalDeleted += missing.count
+                totalUpdated += sizeUpdates.count
+                dirtyParents.formUnion(parents)
+            } catch {
+                logger.error("Path sweep batch failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+
+            await Task.yield()
+        }
+
+        guard !dirtyParents.isEmpty else { return }
+        do {
+            try await fileRepository.updateAncestorSizes(forPaths: dirtyParents)
+            try await fileRepository.refreshRootDirectorySize()
+        } catch {
+            logger.error("Path sweep ancestor recompute failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        invalidateCache(preserveDuplicateGroups: true, preserveStaleFiles: true, preserveDetectedCaches: true, preserveCleanup: true)
+        dataVersion += 1
+        await refreshVisualizationData()
+        scheduleAutoGrowthRefresh()
+
+        logger.info("Path sweep finished: \(totalDeleted, privacy: .public) deleted, \(totalUpdated, privacy: .public) size-updated")
+    }
+
+    private func purgePseudoFilesystemPathsIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.pseudoFsPurgeFlag) else { return }
+
+        Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            do {
+                let deletedCount = try await self.fileRepository.deleteIndexedPaths(
+                    inExcludedRoots: ["/dev", "/.vol"]
+                )
+                UserDefaults.standard.set(true, forKey: Self.pseudoFsPurgeFlag)
+                guard deletedCount > 0 else { return }
+
+                try await self.fileRepository.updateAncestorSizes(forPaths: Set(["/"]))
+                try await self.fileRepository.refreshRootDirectorySize()
+                await self.refreshAfterIndexedFileMutation(
+                    preserveDuplicateGroups: true,
+                    preserveStaleFiles: true,
+                    preserveDetectedCaches: true,
+                    preserveCleanup: true
+                )
+                _ = try? await self.fileRepository.compactIfNeeded()
+            } catch {
+                self.logger.error("Pseudo-fs purge failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     private func sanitizeManagedStorageIfNeeded() {

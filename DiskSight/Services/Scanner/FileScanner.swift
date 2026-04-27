@@ -43,6 +43,7 @@ struct FileScanner {
 
                     let resourceKeys: Set<URLResourceKey> = [
                         .fileSizeKey,
+                        .totalFileAllocatedSizeKey,
                         .isDirectoryKey,
                         .isRegularFileKey,
                         .volumeIsInternalKey,
@@ -161,7 +162,7 @@ struct FileScanner {
                                         continue // unchanged
                                     }
 
-                                    let size = Int64(values.fileSize ?? 0)
+                                    let size = Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
                                     let node = FileNode(
                                         path: path,
                                         name: fileURL.lastPathComponent,
@@ -263,6 +264,7 @@ struct FileScanner {
 
                     let resourceKeys: Set<URLResourceKey> = [
                         .fileSizeKey,
+                        .totalFileAllocatedSizeKey,
                         .isDirectoryKey,
                         .isRegularFileKey,
                         .volumeIsInternalKey,
@@ -373,7 +375,7 @@ struct FileScanner {
                                     continue
                                 }
 
-                                let size = Int64(values.fileSize ?? 0)
+                                let size = Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
                                 let node = FileNode(
                                     path: path,
                                     name: fileURL.lastPathComponent,
@@ -460,6 +462,7 @@ struct FileScanner {
 
                     let resourceKeys: Set<URLResourceKey> = [
                         .fileSizeKey,
+                        .totalFileAllocatedSizeKey,
                         .isDirectoryKey,
                         .isRegularFileKey,
                         .volumeIsInternalKey,
@@ -526,7 +529,7 @@ struct FileScanner {
                         if !isDir && values.isRegularFile != true {
                             continue
                         }
-                        let size = Int64(values.fileSize ?? 0)
+                        let size = Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
 
                         let node = FileNode(
                             path: fileURL.path,
