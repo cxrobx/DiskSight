@@ -1,6 +1,14 @@
 import Foundation
 import OSLog
 
+/// Reference counter for directories the enumerator could not descend into.
+/// The enumerator's errorHandler is invoked synchronously on the producer
+/// task's thread, so a simple reference counter is safe here.
+private final class SkipTracker {
+    private(set) var count = 0
+    func record() { count += 1 }
+}
+
 struct FileScanner {
     private let logger = Logger(subsystem: "com.disksight.app", category: "FileScanner")
     private let repository: FileRepository
@@ -8,6 +16,25 @@ struct FileScanner {
 
     init(repository: FileRepository) {
         self.repository = repository
+    }
+
+    /// True if an error from FileManager enumeration represents a permission
+    /// denial (the meaningful "needs Full Disk Access" signal), as opposed to a
+    /// transient I/O error or dangling directory entry.
+    static func isPermissionDenied(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileReadNoPermissionError {
+            return true
+        }
+        if nsError.domain == NSPOSIXErrorDomain && (nsError.code == Int(EACCES) || nsError.code == Int(EPERM)) {
+            return true
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            if underlying.domain == NSPOSIXErrorDomain && (underlying.code == Int(EACCES) || underlying.code == Int(EPERM)) {
+                return true
+            }
+        }
+        return false
     }
 
     /// Reconcile a changed directory subtree against disk state. This is used by
@@ -94,7 +121,11 @@ struct FileScanner {
                                 at: dirURL,
                                 includingPropertiesForKeys: Array(resourceKeys),
                                 options: []
-                            ) else { continue }
+                            ) else {
+                                // Couldn't read this directory (permission denied / FDA).
+                                progress.skippedDirectories += 1
+                                continue
+                            }
 
                             let dbChildren = try repository.existingChildrenModifiedTimes(parentPath: dirPath)
                             var fsChildPaths = Set<String>()
@@ -304,7 +335,11 @@ struct FileScanner {
                             at: dirURL,
                             includingPropertiesForKeys: Array(resourceKeys),
                             options: []
-                        ) else { continue }
+                        ) else {
+                            // Couldn't read this directory (permission denied / FDA).
+                            progress.skippedDirectories += 1
+                            continue
+                        }
 
                         let dbChildren = try repository.existingChildrenModifiedTimes(parentPath: dirPath)
                         var fsChildPaths = Set<String>()
@@ -459,6 +494,7 @@ struct FileScanner {
 
                     var progress = ScanProgress()
                     var batch: [FileNode] = []
+                    let skipTracker = SkipTracker()
 
                     let resourceKeys: Set<URLResourceKey> = [
                         .fileSizeKey,
@@ -473,10 +509,20 @@ struct FileScanner {
                         .isSymbolicLinkKey
                     ]
 
+                    // errorHandler fires when the enumerator can't access an item.
+                    // Count ONLY permission-denied failures (the Full-Disk-Access
+                    // signal) so the "scan incomplete" count is meaningful and not
+                    // inflated by transient I/O errors or dangling entries.
                     guard let enumerator = FileManager.default.enumerator(
                         at: rootURL,
                         includingPropertiesForKeys: Array(resourceKeys),
-                        options: []
+                        options: [],
+                        errorHandler: { _, error in
+                            if Self.isPermissionDenied(error) {
+                                skipTracker.record()
+                            }
+                            return true
+                        }
                     ) else {
                         continuation.finish()
                         return
@@ -554,6 +600,9 @@ struct FileScanner {
                         if batch.count >= batchSize {
                             try await repository.insertFilesBatch(batch)
                             batch.removeAll(keepingCapacity: true)
+                            // Surface the running skipped-dir count so mid-scan
+                            // scan_status polls don't always report 0.
+                            progress.skippedDirectories = skipTracker.count
                             continuation.yield(progress)
                         }
                     }
@@ -566,6 +615,7 @@ struct FileScanner {
                     // Calculate directory sizes
                     try await repository.calculateDirectorySizes()
 
+                    progress.skippedDirectories = skipTracker.count
                     progress.completed = true
                     continuation.yield(progress)
                     continuation.finish()

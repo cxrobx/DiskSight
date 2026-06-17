@@ -15,12 +15,23 @@ Native macOS disk usage visualization and analysis app. Scans directories, visua
 
 ## Golden Commands
 ```bash
-# Build
+# Build app (Xcode project)
 xcodebuild -scheme DiskSight -destination 'platform=macOS' build
 
-# Test
+# Test app
 xcodebuild -scheme DiskSight -destination 'platform=macOS' test
+
+# Build + test the MCP server / shared core (SwiftPM package)
+swift build          # DiskSightCore + DiskSightMCP
+swift test           # DiskSightCore read-path tests
+./scripts/build-mcp.sh [--bundle]   # release binary (optionally bundle into the .app)
 ```
+
+> **Two build systems coexist.** The app is built from `DiskSight.xcodeproj`
+> (untouched by SPM). `Package.swift` vends `DiskSightCore` (shared read code,
+> same physical files via explicit `sources:`) and `DiskSightMCP` (the MCP stdio
+> server — the only target that links the MCP SDK). The app never links the SDK.
+> GRDB is pinned to 7.x in both. See [`docs/mcp.md`](docs/mcp.md).
 
 ## Critical Invariants (DO NOT BREAK)
 1. **AppState is @MainActor** — all `@Published` properties, views access via `@EnvironmentObject`
@@ -38,6 +49,7 @@ Full list in `.claude/rules/architecture.md`
 | `.claude/rules/gotchas.md` | Known issues (26 items) | Always |
 | `docs/README.md` | Documentation index | On demand |
 | `docs/setup.md` | Build & environment setup | On demand |
+| `docs/mcp.md` | MCP server: read tools + app-mediated scans | On demand |
 | `CHANGELOG.md` | Version history | On demand |
 
 ## Key Types
@@ -55,6 +67,10 @@ Full list in `.claude/rules/architecture.md`
 | `OllamaClient` | HTTP client to Ollama LLM API | `Services/AI/OllamaClient.swift` |
 | `CleanupRecommendation` | Recommendation model + GRDB record | `Models/CleanupRecommendation.swift` |
 | `FileCategory` | Category/confidence/signal enums | `Models/FileCategory.swift` |
+| `DiskSightReader` | Public read-only facade (read tools) | `Services/MCP/DiskSightReader.swift` |
+| `ScanCommandServer` | App-side Unix-socket command listener | `Services/MCP/ScanCommandServer.swift` |
+| `ScanJobRegistry` | Bridges socket commands → AppState scans | `Services/MCP/ScanJobRegistry.swift` |
+| `DiskSightMCP` | MCP stdio server executable | `Sources/DiskSightMCP/` (SwiftPM) |
 
 ## Service Connections
 ```

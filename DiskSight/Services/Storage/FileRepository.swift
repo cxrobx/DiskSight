@@ -52,7 +52,7 @@ actor FileRepository {
         }
     }
 
-    func completeScanSession(id: Int64) throws {
+    func completeScanSession(id: Int64, skippedDirectories: Int = 0) throws {
         try database.dbPool.write { db in
             let stats = try Row.fetchOne(db, sql: """
                 SELECT
@@ -64,13 +64,14 @@ actor FileRepository {
 
             try db.execute(sql: """
                 UPDATE scan_sessions
-                SET completed_at = ?, file_count = ?, total_size = ?, indexed_size = ?
+                SET completed_at = ?, file_count = ?, total_size = ?, indexed_size = ?, skipped_directories = ?
                 WHERE id = ?
                 """, arguments: [
                     Date().timeIntervalSince1970,
                     stats?["count"] ?? 0,
                     stats?["total"] ?? 0,
                     stats?["indexed"] ?? 0,
+                    skippedDirectories,
                     id
                 ])
         }
@@ -674,7 +675,11 @@ actor FileRepository {
     /// Recompute session stats (file_count, total_size, indexed_size) from the files table
     /// and update completed_at. Called after incremental sync and file deletion mutations
     /// so that pre-computed stats remain accurate for cold-launch reads.
-    func updateSessionStats(id: Int64) throws {
+    ///
+    /// `skippedDirectories`: when non-nil, also refresh the persisted unreadable-dir
+    /// count so `scan_status` reflects the latest sync (incremental path passes the
+    /// sync's count). When nil (e.g. trash/delete callers), the column is left as-is.
+    func updateSessionStats(id: Int64, skippedDirectories: Int? = nil) throws {
         try database.dbPool.write { db in
             let stats = try Row.fetchOne(db, sql: """
                 SELECT
@@ -683,17 +688,32 @@ actor FileRepository {
                   COALESCE(SUM(CASE WHEN is_directory = 0 THEN size ELSE 0 END), 0) as indexed
                 FROM files WHERE scan_session_id = ?
                 """, arguments: [id])
-            try db.execute(sql: """
-                UPDATE scan_sessions
-                SET file_count = ?, total_size = ?, indexed_size = ?, completed_at = ?
-                WHERE id = ?
-                """, arguments: [
-                    stats?["count"] ?? 0,
-                    stats?["total"] ?? 0,
-                    stats?["indexed"] ?? 0,
-                    Date().timeIntervalSince1970,
-                    id
-                ])
+            if let skippedDirectories {
+                try db.execute(sql: """
+                    UPDATE scan_sessions
+                    SET file_count = ?, total_size = ?, indexed_size = ?, completed_at = ?, skipped_directories = ?
+                    WHERE id = ?
+                    """, arguments: [
+                        stats?["count"] ?? 0,
+                        stats?["total"] ?? 0,
+                        stats?["indexed"] ?? 0,
+                        Date().timeIntervalSince1970,
+                        skippedDirectories,
+                        id
+                    ])
+            } else {
+                try db.execute(sql: """
+                    UPDATE scan_sessions
+                    SET file_count = ?, total_size = ?, indexed_size = ?, completed_at = ?
+                    WHERE id = ?
+                    """, arguments: [
+                        stats?["count"] ?? 0,
+                        stats?["total"] ?? 0,
+                        stats?["indexed"] ?? 0,
+                        Date().timeIntervalSince1970,
+                        id
+                    ])
+            }
         }
     }
 
@@ -1312,4 +1332,135 @@ actor FileRepository {
             )
         }
     }
+
+    // MARK: - MCP Read Surface (concurrent)
+
+    /// Nonisolated read variants used by the out-of-process MCP reader and any
+    /// caller that wants to bypass actor serialization (same rationale as the
+    /// other `*Concurrent` methods — gotcha #26). All are pure read-only queries.
+
+    nonisolated func searchFilesConcurrent(query: String, limit: Int = 100) throws -> [FileNode] {
+        let pattern = "%\(query)%"
+        return try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("name").like(pattern))
+                .order(Column("size").desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    nonisolated func topFoldersConcurrent(parentPath: String?, limit: Int = 10) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            if let parentPath = parentPath {
+                return try FileNode
+                    .filter(Column("parent_path") == parentPath)
+                    .filter(Column("is_directory") == true)
+                    .order(Column("size").desc)
+                    .limit(limit)
+                    .fetchAll(db)
+            } else {
+                return try FileNode
+                    .filter(Column("is_directory") == true)
+                    .filter(Column("parent_path") == nil)
+                    .order(Column("size").desc)
+                    .limit(limit)
+                    .fetchAll(db)
+            }
+        }
+    }
+
+    nonisolated func recommendationsConcurrent(forSession sessionId: Int64, confidence: String) throws -> [CleanupRecommendationRecord] {
+        try database.dbPool.read { db in
+            try CleanupRecommendationRecord
+                .filter(Column("scan_session_id") == sessionId)
+                .filter(Column("confidence") == confidence)
+                .order(Column("file_size").desc)
+                .fetchAll(db)
+        }
+    }
+
+    nonisolated func recommendationsConcurrent(forSession sessionId: Int64) throws -> [CleanupRecommendationRecord] {
+        try database.dbPool.read { db in
+            try CleanupRecommendationRecord
+                .filter(Column("scan_session_id") == sessionId)
+                .order(Column("confidence").asc, Column("file_size").desc)
+                .fetchAll(db)
+        }
+    }
+
+    nonisolated func largestFilesConcurrent(limit: Int = 20) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("is_directory") == false)
+                .order(Column("size").desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    nonisolated func childrenWithSizesConcurrent(ofPath path: String, limit: Int) throws -> [FileNode] {
+        try database.dbPool.read { db in
+            try FileNode
+                .filter(Column("parent_path") == path)
+                .filter(Column("size") > 0)
+                .order(Column("size").desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    /// Composite "bloat report" read — file-type distribution, largest files, and
+    /// the top duplicate groups, computed in a single read snapshot so the three
+    /// views are mutually consistent.
+    nonisolated func bloatReport(largestLimit: Int = 20, duplicateLimit: Int = 25) throws -> BloatReport {
+        try database.dbPool.read { db in
+            let typeRows = try Row.fetchAll(db, sql: """
+                SELECT file_type, SUM(size) as total_size
+                FROM files
+                WHERE is_directory = 0 AND file_type IS NOT NULL
+                GROUP BY file_type
+                ORDER BY total_size DESC
+                LIMIT 10
+                """)
+            let fileTypes = typeRows.map { ($0["file_type"] as String? ?? "unknown", $0["total_size"] as Int64? ?? 0) }
+
+            let largest = try FileNode
+                .filter(Column("is_directory") == false)
+                .order(Column("size").desc)
+                .limit(largestLimit)
+                .fetchAll(db)
+
+            let hashes = try Row.fetchAll(db, sql: """
+                SELECT content_hash, size FROM files
+                WHERE is_directory = 0 AND content_hash IS NOT NULL
+                GROUP BY content_hash HAVING COUNT(*) > 1
+                ORDER BY size * COUNT(*) DESC
+                LIMIT ?
+                """, arguments: [duplicateLimit])
+
+            var duplicates: [DuplicateGroup] = []
+            for row in hashes {
+                let hash: String = row["content_hash"]
+                let size: Int64 = row["size"]
+                let files = try FileNode
+                    .filter(Column("is_directory") == false)
+                    .filter(Column("content_hash") == hash)
+                    .fetchAll(db)
+                if files.count > 1 {
+                    duplicates.append(DuplicateGroup(id: hash, files: files, fileSize: size))
+                }
+            }
+
+            return BloatReport(fileTypes: fileTypes, largest: largest, duplicates: duplicates)
+        }
+    }
+}
+
+/// Result of `FileRepository.bloatReport` — a one-shot snapshot of the headline
+/// disk-bloat signals used by the MCP `bloat_report` tool.
+struct BloatReport {
+    let fileTypes: [(String, Int64)]
+    let largest: [FileNode]
+    let duplicates: [DuplicateGroup]
 }

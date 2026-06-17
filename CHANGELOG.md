@@ -2,6 +2,20 @@
 
 All notable changes to DiskSight are documented here.
 
+## [Unreleased]
+
+### Added
+- **DiskSight MCP server** (`DiskSightMCP`) — a standalone Model Context Protocol stdio server letting an AI agent inspect the disk index and launch bounded scans. Hybrid design: read tools open the shared SQLite index read-only in-process (no app, no Full Disk Access); scan tools connect to the running app over a Unix socket so the app stays the sole DB writer (auto-launching it if needed). Non-destructive — no delete/trash/shell tools.
+  - New SwiftPM package: `DiskSightCore` (shared read code compiled in place via explicit `sources:`, GRDB 7.x) + `DiskSightMCP` executable (links the MCP Swift SDK 0.10.2; the app never does). See `docs/mcp.md`.
+  - Read tools: `scan_status`, `bloat_report`, `top_paths`, `cleanup_candidates`, `cache_hotspots`, `growth_hotspots` (cache-only), `stale_files`, `search_files`.
+  - Scan tools: `check_access`, `start_scan`, `scan_job_status`, `cancel_scan`.
+  - App-side `ScanCommandServer` (Unix socket, 0600) + `ScanJobRegistry` bridged to `AppState` with per-job ownership tracking and latched outcomes.
+  - `DiskSightReader` public read-only facade; `Database.init(readOnlyURL:)` (Configuration.readonly, no migrations).
+  - `./scripts/build-mcp.sh [--bundle]` builds the server and optionally bundles + signs it into `DiskSight.app/Contents/Helpers/`.
+
+### Changed
+- **Scan hardening**: the scanner now counts directories it can't read (permission-denied), persists the count on the scan session (migration v14), and surfaces "scan incomplete: N dirs unreadable" — so a partial scan (e.g. missing Full Disk Access) never looks clean. `checkFullDiskAccess()` now probes several protected roots instead of one.
+
 ## [1.1.2] - 2026-02-09
 
 ### Fixed
