@@ -24,6 +24,7 @@ struct SettingsView: View {
     @AppStorage("visualizationMode") private var defaultVizMode: VisualizationMode = .treemap
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
     @AppStorage("llmEnabled") private var llmEnabled = false
+    @AppStorage("runInBackground") private var runInBackground = false
     @State private var providerTestResult: String?
     @State private var providerTestSucceeded = false
     @State private var isTesting = false
@@ -57,6 +58,15 @@ struct SettingsView: View {
             Section("Monitoring") {
                 Toggle("Enable real-time monitoring", isOn: $appState.monitoringEnabled)
                 Text("When enabled, DiskSight watches for file changes after a scan")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Run in background (hide Dock icon)", isOn: $runInBackground)
+                    .onChange(of: runInBackground) { _, newValue in
+                        NSApp.setActivationPolicy(newValue ? .accessory : .regular)
+                        if !newValue { NSApp.activate(ignoringOtherApps: true) }
+                    }
+                Text("Keeps DiskSight resident in the menu bar so its index stays fresh (no cold re-scans). Pair with Login Items to start it automatically.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
