@@ -26,6 +26,7 @@ Tech stack: Swift, SwiftUI (MVVM), macOS 14.0+, SQLite/GRDB 7.8.0, xxHash-Swift 
 
 ### FSEvents Monitoring
 - C API `FSEventStreamCreate` with file-level granularity, 2s debounce
+- **Scoped watch roots**: a `/` scan must NOT watch `/` (system-wide firehose pegs ~1.5 cores idle). `IndexedPathRules.monitorWatchRoots(forScanRoot:homeDirectory:)` returns `[home, /Applications]` for a `/` scan, `[root]` otherwise; `start()` passes that array to `FSEventStreamCreate`. `monitoredPath` stays the scan root so handler filtering is unchanged. Non-watched areas refresh only via rescan, not live.
 - Event ID persisted on `ScanSession` for resume; saved synchronously on quit via `nonisolated updateEventIdSync()`
 - Incremental: create/modify → upsert, delete → remove; ancestor sizes recalculated via `updateAncestorSizes(forPaths:)`
 - **Batch processing pipeline**: `processPendingEvents()` classifies paths into upserts vs deletes upfront, batches DB operations. `batchProcessedSubject` fires once after the entire batch completes (gotcha #22)
