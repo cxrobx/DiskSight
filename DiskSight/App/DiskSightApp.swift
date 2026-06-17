@@ -25,6 +25,7 @@ struct DiskSightApp: App {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 1100, minHeight: 600)
+                .background(WindowAccessor { appDelegate.mainWindow = $0 })
                 .preferredColorScheme(selectedColorScheme)
                 .alert(item: $appState.activeAlert) { alert in
                     Alert(
@@ -306,16 +307,27 @@ enum DiskSightWindow {
 /// app launches as a menu-bar agent (no Dock icon, no window); the MenuBarExtra
 /// keeps it alive so FSEvents keeps the index fresh. Default OFF — normal app.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The main DiskSight window, captured via WindowAccessor. Used so we only
+    /// react to the MAIN window closing (not Settings/sheets).
+    weak var mainWindow: NSWindow?
     private var windowCloseObserver: Any?
 
     private var runInBackground: Bool {
         UserDefaults.standard.bool(forKey: "runInBackground")
     }
 
+    private var hasCompletedOnboarding: Bool {
+        UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if runInBackground {
+        // Enter menu-bar-agent mode at launch ONLY when onboarding is done.
+        // On a fresh install the onboarding window must stay visible — otherwise
+        // the user is stuck as a menu-bar-only app with no way to start a scan.
+        if runInBackground && hasCompletedOnboarding {
             NSApp.setActivationPolicy(.accessory)
-            // The `Window` scene auto-opens at launch — close it so we start silent.
+            // The `Window` scene auto-opens at launch — close it so we start
+            // silent. At launch the only main-capable window is ours.
             DispatchQueue.main.async {
                 for window in NSApp.windows where window.canBecomeMain {
                     window.close()
@@ -323,14 +335,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // When the main window closes in background mode, drop the Dock icon.
+        // When the MAIN window closes in background mode, drop the Dock icon.
+        // Matching the tracked main window avoids flipping when Settings closes.
         windowCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: nil, queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
             guard let self, self.runInBackground else { return }
-            DispatchQueue.main.async {
-                let hasVisibleMain = NSApp.windows.contains { $0.canBecomeMain && $0.isVisible }
-                if !hasVisibleMain { NSApp.setActivationPolicy(.accessory) }
+            if (note.object as? NSWindow) === self.mainWindow {
+                NSApp.setActivationPolicy(.accessory)
             }
         }
     }
@@ -338,6 +350,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MenuBarExtra keeps the app alive; never quit just because the window closed.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+}
+
+/// Captures the hosting `NSWindow` of a SwiftUI view so AppKit-level window
+/// management (activation policy) can target the main window precisely.
+struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { onResolve(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { onResolve(nsView.window) }
     }
 }
 

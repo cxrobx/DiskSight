@@ -22,12 +22,25 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"   # xcodebuild + swift build resolve project/Package.swift from CWD
 DERIVED_DATA="${PROJECT_DIR}/build/DerivedData"
 APP_NAME="DiskSight.app"
 APP_SRC="${DERIVED_DATA}/Build/Products/Release/${APP_NAME}"
 APP_DST="/Applications/${APP_NAME}"
 ENTITLEMENTS="${PROJECT_DIR}/DiskSight/DiskSight.entitlements"
 BACKUP_SUFFIX=".backup-$(date +%Y-%m-%d-%H%M%S)"
+
+# If the install fails after we've moved the old app aside, put it back so the
+# user is never left without /Applications/DiskSight.app.
+BACKED_UP=""
+restore_backup_on_failure() {
+    local code=$?
+    if [[ $code -ne 0 && -n "$BACKED_UP" && ! -d "$APP_DST" ]]; then
+        echo "[install-release-local] Install failed — restoring previous app from backup."
+        mv "$BACKED_UP" "$APP_DST" 2>/dev/null || true
+    fi
+}
+trap restore_backup_on_failure EXIT
 
 # --- Detect signing identity ------------------------------------------------
 DEVID="$(security find-identity -v -p codesigning 2>/dev/null \
@@ -93,8 +106,9 @@ sleep 2
 if pgrep -x DiskSight >/dev/null; then pkill -TERM -x DiskSight || true; sleep 2; fi
 
 if [[ -d "$APP_DST" ]]; then
-    echo "[install-release-local] Backing up existing install to ${APP_DST}${BACKUP_SUFFIX}"
-    mv "$APP_DST" "${APP_DST}${BACKUP_SUFFIX}"
+    BACKED_UP="${APP_DST}${BACKUP_SUFFIX}"
+    echo "[install-release-local] Backing up existing install to $BACKED_UP"
+    mv "$APP_DST" "$BACKED_UP"
 fi
 
 echo "[install-release-local] Installing to $APP_DST"
@@ -106,3 +120,4 @@ codesign --verify --verbose=2 "$APP_DST" 2>&1 | tail -2
 
 echo "[install-release-local] Done. Launch from /Applications/DiskSight.app."
 echo "[install-release-local] MCP helper: ${APP_DST}/Contents/Helpers/DiskSightMCP"
+[[ -n "$BACKED_UP" ]] && echo "[install-release-local] Previous install backed up at: $BACKED_UP"
