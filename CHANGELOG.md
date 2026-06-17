@@ -5,6 +5,15 @@ All notable changes to DiskSight are documented here.
 ## [Unreleased]
 
 ### Added
+- **Menu-bar background agent** — a `MenuBarExtra` menu-bar item shows index freshness with Open / Refresh / Quit, and a new "Run in background (hide Dock icon)" setting (`NSApp.setActivationPolicy(.accessory)`) lets DiskSight stay resident without a Dock icon. Paired with a Login Item, the FSEvents monitor keeps the index continuously fresh — so there are no cold from-scratch re-scans after the app has been closed a while.
+
+### Changed
+- **`install-release-local.sh` now signs with your Developer ID** (auto-detected; ad-hoc fallback) and bundles the `DiskSightMCP` helper. Because the TCC grant is keyed to the Team ID instead of the ad-hoc cdhash, **Full Disk Access survives every rebuild** — no more re-granting FDA after each local install.
+
+### Fixed
+- **Multi-hour scans** — recursive deletes used a non-sargable `substr()/length()` predicate that full-scanned the millions-row files table per deleted path (a full re-walk could peg a core for 7.5h without finishing). Replaced with a sargable prefix range on the `path` index (`SCAN files` → `SEARCH … USING INDEX`). An MCP `start_scan` also now preempts the launch-time auto-refresh instead of being blocked by it.
+
+### Added (earlier in this cycle)
 - **DiskSight MCP server** (`DiskSightMCP`) — a standalone Model Context Protocol stdio server letting an AI agent inspect the disk index and launch bounded scans. Hybrid design: read tools open the shared SQLite index read-only in-process (no app, no Full Disk Access); scan tools connect to the running app over a Unix socket so the app stays the sole DB writer (auto-launching it if needed). Non-destructive — no delete/trash/shell tools.
   - New SwiftPM package: `DiskSightCore` (shared read code compiled in place via explicit `sources:`, GRDB 7.x) + `DiskSightMCP` executable (links the MCP Swift SDK 0.10.2; the app never does). See `docs/mcp.md`.
   - Read tools: `scan_status`, `bloat_report`, `top_paths`, `cleanup_candidates`, `cache_hotspots`, `growth_hotspots` (cache-only), `stale_files`, `search_files`.

@@ -1,8 +1,12 @@
 import SwiftUI
+import AppKit
 import Sparkle
 
 @main
 struct DiskSightApp: App {
+    static let mainWindowID = "main"
+
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appState = AppState()
     @Environment(\.scenePhase) private var scenePhase
     @State private var showOnboarding = false
@@ -17,10 +21,11 @@ struct DiskSightApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        Window("DiskSight", id: DiskSightApp.mainWindowID) {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 1100, minHeight: 600)
+                .background(WindowAccessor { appDelegate.mainWindow = $0 })
                 .preferredColorScheme(selectedColorScheme)
                 .alert(item: $appState.activeAlert) { alert in
                     Alert(
@@ -135,6 +140,11 @@ struct DiskSightApp: App {
 
         Settings {
             SettingsView(updater: updaterController.updater)
+                .environmentObject(appState)
+        }
+
+        MenuBarExtra("DiskSight", systemImage: "internaldrive") {
+            MenuBarContent()
                 .environmentObject(appState)
         }
     }
@@ -276,6 +286,129 @@ struct ActivityLogView: View {
             return .orange
         case .error:
             return .red
+        }
+    }
+}
+
+// MARK: - Menu-bar background agent
+
+/// Brings up the main window and makes the app a regular (Dock-visible) app
+/// while a window is on screen.
+@MainActor
+enum DiskSightWindow {
+    static func show(_ openWindow: OpenWindowAction) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: DiskSightApp.mainWindowID)
+    }
+}
+
+/// Drives the "run in background (hide Dock icon)" behavior. With it enabled the
+/// app launches as a menu-bar agent (no Dock icon, no window); the MenuBarExtra
+/// keeps it alive so FSEvents keeps the index fresh. Default OFF — normal app.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The main DiskSight window, captured via WindowAccessor. Used so we only
+    /// react to the MAIN window closing (not Settings/sheets).
+    weak var mainWindow: NSWindow?
+    private var windowCloseObserver: Any?
+
+    private var runInBackground: Bool {
+        UserDefaults.standard.bool(forKey: "runInBackground")
+    }
+
+    private var hasCompletedOnboarding: Bool {
+        UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Enter menu-bar-agent mode at launch ONLY when onboarding is done.
+        // On a fresh install the onboarding window must stay visible — otherwise
+        // the user is stuck as a menu-bar-only app with no way to start a scan.
+        if runInBackground && hasCompletedOnboarding {
+            NSApp.setActivationPolicy(.accessory)
+            // The `Window` scene auto-opens at launch — close it so we start
+            // silent. At launch the only main-capable window is ours.
+            DispatchQueue.main.async {
+                for window in NSApp.windows where window.canBecomeMain {
+                    window.close()
+                }
+            }
+        }
+
+        // When the MAIN window closes in background mode, drop the Dock icon.
+        // Matching the tracked main window avoids flipping when Settings closes.
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, self.runInBackground else { return }
+            if (note.object as? NSWindow) === self.mainWindow {
+                NSApp.setActivationPolicy(.accessory)
+            }
+        }
+    }
+
+    // MenuBarExtra keeps the app alive; never quit just because the window closed.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
+
+/// Captures the hosting `NSWindow` of a SwiftUI view so AppKit-level window
+/// management (activation policy) can target the main window precisely.
+struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { onResolve(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { onResolve(nsView.window) }
+    }
+}
+
+/// Contents of the menu-bar item: index freshness + quick actions.
+struct MenuBarContent: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Text(freshnessLine)
+
+        Divider()
+
+        Button("Open DiskSight") { DiskSightWindow.show(openWindow) }
+        Button(appState.isSyncing ? "Refreshing…" : "Refresh Now") {
+            appState.refreshMetrics()
+        }
+        .disabled(!appState.canRefreshMetrics || appState.isSyncing)
+
+        Divider()
+
+        Button("Quit DiskSight") { NSApplication.shared.terminate(nil) }
+    }
+
+    private var freshnessLine: String {
+        if appState.isSyncing { return "Refreshing index…" }
+        if case .scanning(let progress) = appState.scanState {
+            return "Scanning… \(progress.filesScanned) files"
+        }
+        guard let session = appState.lastScanSession, let completed = session.completedAt else {
+            return "No scan yet"
+        }
+        let age = Date().timeIntervalSince1970 - completed
+        let count = session.fileCount.map { "\($0) files" } ?? "indexed"
+        return "Indexed \(Self.relativeAge(age)) · \(count)"
+    }
+
+    private static func relativeAge(_ seconds: Double) -> String {
+        switch seconds {
+        case ..<90: return "just now"
+        case ..<3600: return "\(Int(seconds / 60))m ago"
+        case ..<86_400: return "\(Int(seconds / 3600))h ago"
+        default: return "\(Int(seconds / 86_400))d ago"
         }
     }
 }
