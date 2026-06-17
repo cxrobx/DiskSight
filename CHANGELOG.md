@@ -4,6 +4,9 @@ All notable changes to DiskSight are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **Scoped real-time monitoring** — a `/` (whole-disk) scan used to run its FSEvents stream on `/` itself, so the kernel delivered a system-wide event firehose (logs, `/private/var`, temp, diagnostics, per-app container churn) that pegged ~1.5 CPU cores even at idle. The monitor now watches only the user-owned areas (home + `/Applications`) at the stream level for a `/` scan, so that noise is never delivered. Measured: ~1.5 cores → near-zero idle CPU. Changes outside those areas are still captured by a full/incremental rescan; they just aren't live. Non-root scans are unaffected.
+
 ### Added
 - **Menu-bar background agent** — a `MenuBarExtra` menu-bar item shows index freshness with Open / Refresh / Quit, and a new "Run in background (hide Dock icon)" setting (`NSApp.setActivationPolicy(.accessory)`) lets DiskSight stay resident without a Dock icon. Paired with a Login Item, the FSEvents monitor keeps the index continuously fresh — so there are no cold from-scratch re-scans after the app has been closed a while.
 

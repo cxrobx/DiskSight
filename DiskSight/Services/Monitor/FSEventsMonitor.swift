@@ -39,7 +39,14 @@ final class FSEventsMonitor: @unchecked Sendable {
         stop()
 
         monitoredPath = path
-        let pathCF = [path as CFString] as CFArray
+        // Watch only user-owned areas for a root ("/") scan so the kernel never
+        // delivers the system-wide event firehose. Non-root scans watch directly.
+        let watchRoots = IndexedPathRules.monitorWatchRoots(
+            forScanRoot: path,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser.path
+        )
+        logger.info("FSEvents watching \(watchRoots.count, privacy: .public) root(s): \(watchRoots.joined(separator: ", "), privacy: .public)")
+        let pathCF = watchRoots.map { $0 as CFString } as CFArray
 
         var context = FSEventStreamContext()
         context.info = Unmanaged.passUnretained(self).toOpaque()
