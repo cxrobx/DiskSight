@@ -116,4 +116,31 @@ final class DiskSightReaderTests: XCTestCase {
             XCTAssertTrue(error is DiskSightReaderError)
         }
     }
+
+    /// The sargable prefix delete must remove a directory + all descendants,
+    /// spare prefix-siblings (e.g. deleting /a must NOT touch /ab or /a-x), and
+    /// handle wildcard chars (% _) in names safely.
+    func testRecursiveDeleteIsPrefixSafe() async throws {
+        let url = uniqueDBURL()
+        defer { cleanup(url) }
+        let db = try Database(databaseURL: url)
+        let repo = FileRepository(database: db)
+        let session = try await repo.createScanSession(rootPath: "/")
+        let sid = try XCTUnwrap(session.id)
+
+        func node(_ p: String, dir: Bool = false) -> FileNode {
+            FileNode(path: p, name: (p as NSString).lastPathComponent, parentPath: (p as NSString).deletingLastPathComponent, size: 1, isDirectory: dir, scanSessionId: sid)
+        }
+        let all = [
+            "/a", "/a/b.txt", "/a/sub", "/a/sub/c.txt", "/a/100%_x.txt",  // /a + descendants → deleted
+            "/ab.txt", "/a-x.txt", "/abc/d.txt", "/b.txt",                // prefix-siblings / others → kept
+        ]
+        try await repo.insertFilesBatch(all.map { node($0, dir: $0.hasSuffix("a") || $0.hasSuffix("sub")) })
+
+        try await repo.deleteFilesRecursive(paths: ["/a"])
+
+        let remaining = Set(try await repo.allFiles(forSession: sid).map(\.path))
+        XCTAssertEqual(remaining, ["/ab.txt", "/a-x.txt", "/abc/d.txt", "/b.txt"],
+                       "must delete /a and all descendants while sparing prefix-siblings")
+    }
 }
