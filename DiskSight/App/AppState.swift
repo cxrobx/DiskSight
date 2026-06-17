@@ -558,7 +558,14 @@ final class AppState: ObservableObject {
     func mcpTriggerScan(rootPath: String, mode: String, jobID: String) -> String? {
         guard !storageFailureActive else { return "DiskSight storage is unavailable." }
         if case .scanning = scanState { return "A scan is already in progress." }
-        if isSyncing { return "A refresh is already in progress." }
+        if isSyncing {
+            // An MCP-owned sync is already running — don't stomp it.
+            if mcpActiveJobID != nil { return "A refresh is already in progress." }
+            // Otherwise preempt an automatic/UI incremental sync (e.g. the
+            // launch-time stale-index refresh) so an explicit MCP scan wins.
+            incrementalSyncTask?.cancel()
+            isSyncing = false
+        }
 
         // Resolve symlinks BEFORE validation so a symlink can't smuggle the root
         // past the directory / managed-storage checks (and so we scan the real

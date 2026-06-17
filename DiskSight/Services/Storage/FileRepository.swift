@@ -119,13 +119,18 @@ actor FileRepository {
         return try database.dbPool.write { db in
             var deletedCount = 0
             for root in uniqueRoots {
+                // Sargable prefix match (uses the UNIQUE index on `path`): a
+                // descendant of `root` has a path in [root||'/', root||'0'),
+                // because '0' (0x30) is the byte immediately after '/' (0x2F).
+                // The old substr()/length() predicate was non-sargable → a full
+                // table scan per root.
                 deletedCount += try Int.fetchOne(
                     db,
                     sql: """
                         SELECT COUNT(*)
                         FROM files
                         WHERE path = ?1
-                           OR (length(path) > length(?1) AND substr(path, 1, length(?1) + 1) = ?1 || '/')
+                           OR (path >= ?1 || '/' AND path < ?1 || '0')
                         """,
                     arguments: [root]
                 ) ?? 0
@@ -134,7 +139,7 @@ actor FileRepository {
                     sql: """
                         DELETE FROM files
                         WHERE path = ?1
-                           OR (length(path) > length(?1) AND substr(path, 1, length(?1) + 1) = ?1 || '/')
+                           OR (path >= ?1 || '/' AND path < ?1 || '0')
                         """,
                     arguments: [root]
                 )
@@ -750,14 +755,21 @@ actor FileRepository {
     }
 
     /// Recursively delete a directory and all its descendants from the DB.
-    /// Uses substr prefix matching instead of LIKE to handle % and _ in filenames safely.
+    ///
+    /// Uses a SARGABLE prefix range on the UNIQUE `path` index: descendants of
+    /// `path` live in [path||'/', path||'0') because '0' (0x30) is the byte right
+    /// after '/' (0x2F). This replaces the old substr()/length() predicate, which
+    /// was non-sargable and forced a full table scan PER path — with a large
+    /// delete batch on a multi-million-row index that meant hours of CPU and a
+    /// scan that never finished. Range matching is also wildcard-safe (handles %
+    /// and _ in filenames), which was the original reason substr was chosen.
     func deleteFilesRecursive(paths: [String]) throws {
         guard !paths.isEmpty else { return }
         try database.dbPool.write { db in
             for path in paths {
                 try db.execute(sql: """
-                    DELETE FROM files WHERE path = ?1
-                    OR (length(path) > length(?1) AND substr(path, 1, length(?1) + 1) = ?1 || '/')
+                    DELETE FROM files
+                    WHERE path = ?1 OR (path >= ?1 || '/' AND path < ?1 || '0')
                     """, arguments: [path])
             }
         }
