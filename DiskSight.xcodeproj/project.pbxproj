@@ -60,6 +60,9 @@
 		A20000000000000000000025 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 17C54FA1597D67FCF5828176 /* GRDB */; };
 		A20000000000000000000026 /* xxHash-Swift in Frameworks */ = {isa = PBXBuildFile; productRef = 3DA1B721167DDD7A6A3C800A /* xxHash-Swift */; };
 		A20000000000000000000027 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = B20000000000000000000002 /* Sparkle */; };
+		A30000000000000000000012 /* MCPScanProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000011 /* MCPScanProtocol.swift */; };
+		A30000000000000000000014 /* ScanCommandServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000013 /* ScanCommandServer.swift */; };
+		A30000000000000000000016 /* ScanJobRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000015 /* ScanJobRegistry.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -124,6 +127,9 @@
 		FF66AA77BB88CC99DD000003 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		FF66AA77BB88CC99DD000005 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		FF66AA77BB88CC99DD000007 /* FileRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileRowView.swift; sourceTree = "<group>"; };
+		A30000000000000000000011 /* MCPScanProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPScanProtocol.swift; sourceTree = "<group>"; };
+		A30000000000000000000013 /* ScanCommandServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanCommandServer.swift; sourceTree = "<group>"; };
+		A30000000000000000000015 /* ScanJobRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanJobRegistry.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -297,8 +303,19 @@
 				EE55FF66AA77BB88CC990003 /* Monitor */,
 				AA22BB33CC44DD55EE660003 /* Export */,
 				A100000000000000000000BD /* AI */,
+				A30000000000000000000010 /* MCP */,
 			);
 			path = Services;
+			sourceTree = "<group>";
+		};
+		A30000000000000000000010 /* MCP */ = {
+			isa = PBXGroup;
+			children = (
+				A30000000000000000000011 /* MCPScanProtocol.swift */,
+				A30000000000000000000013 /* ScanCommandServer.swift */,
+				A30000000000000000000015 /* ScanJobRegistry.swift */,
+			);
+			path = MCP;
 			sourceTree = "<group>";
 		};
 		A88B98A916016A74BB50C6B8 /* Storage */ = {
@@ -576,6 +593,9 @@
 				A100000000000000000000C1 /* ClaudeCLIClient.swift in Sources */,
 				C2000000000000000000A002 /* GrowthFinder.swift in Sources */,
 				C2000000000000000000A004 /* GrowthView.swift in Sources */,
+				A30000000000000000000012 /* MCPScanProtocol.swift in Sources */,
+				A30000000000000000000014 /* ScanCommandServer.swift in Sources */,
+				A30000000000000000000016 /* ScanJobRegistry.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

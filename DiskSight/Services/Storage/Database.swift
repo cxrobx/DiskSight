@@ -32,6 +32,32 @@ final class Database: Sendable {
         self.startupIssue = startupIssue
     }
 
+    /// Opens an EXISTING database for read-only use by an out-of-process reader
+    /// (the standalone MCP server).
+    ///
+    /// Uses `Configuration.readonly = true`, which is GRDB's supported way to read
+    /// a WAL database without writing: connections are opened `SQLITE_OPEN_READONLY`
+    /// (so any write physically fails), GRDB skips WAL/journal-mode setup (no write
+    /// at open), uses DEFERRED read transactions, and never checkpoints another
+    /// process's WAL. Migrations are NOT run — the reader must never mutate a schema
+    /// the app owns. A read-only WAL reader still observes the latest committed
+    /// state while the app writes.
+    ///
+    /// Throws `CocoaError(.fileNoSuchFile)` if no database exists yet — the caller
+    /// should surface "no index — run a scan in DiskSight".
+    init(readOnlyURL databaseURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        var config = Configuration()
+        config.readonly = true
+
+        self.dbPool = try DatabasePool(path: databaseURL.path, configuration: config)
+        self.databaseURL = databaseURL
+        self.startupIssue = nil
+    }
+
     private static func makeShared() -> Database {
         do {
             return try Database(databaseURL: defaultDatabaseURL())
@@ -350,6 +376,12 @@ final class Database: Sendable {
             // idx_files_session_directory is a leftmost prefix of both
             // idx_files_session_size and idx_files_session_dir_name
             try db.drop(index: "idx_files_session_directory")
+        }
+
+        migrator.registerMigration("v14_session_skipped_directories") { db in
+            try db.alter(table: "scan_sessions") { t in
+                t.add(column: "skipped_directories", .integer)
+            }
         }
 
         return migrator

@@ -19,6 +19,7 @@
 | Document | Description |
 |----------|-------------|
 | [setup.md](./setup.md) | Build & environment setup |
+| [mcp.md](./mcp.md) | Standalone MCP server — read tools + app-mediated scans |
 
 ## Project Overview
 

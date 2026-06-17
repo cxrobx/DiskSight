@@ -70,10 +70,22 @@ actor CacheDetector {
         try await Self.ensureDefaultPatterns(repository: repository)
     }
 
-    func detectCaches() async throws -> [DetectedCache] {
-        try await seedDefaultPatterns()
+    /// Detect cache hotspots. `seedIfEmpty` must be FALSE for read-only callers
+    /// (e.g. the out-of-process MCP reader), which open the database read-only
+    /// and must never write: in that mode we fall back to the built-in default
+    /// patterns in memory instead of inserting them.
+    func detectCaches(seedIfEmpty: Bool = true) async throws -> [DetectedCache] {
+        let patterns: [CachePattern]
+        if seedIfEmpty {
+            try await seedDefaultPatterns()
+            patterns = try await repository.allCachePatterns()
+        } else {
+            let existing = try await repository.allCachePatterns()
+            patterns = existing.isEmpty
+                ? Self.defaultPatterns.map { CachePattern(pattern: $0.0, category: $0.1, safety: $0.2, description: $0.3) }
+                : existing
+        }
 
-        let patterns = try await repository.allCachePatterns()
         var results: [DetectedCache] = []
 
         for pattern in patterns {

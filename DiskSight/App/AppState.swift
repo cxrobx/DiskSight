@@ -50,12 +50,35 @@ struct ScanProgress: Sendable {
     var currentPath: String = ""
     var completed: Bool = false
     var errorMessage: String?
+    /// Number of directories the scanner could not read (permission denied,
+    /// missing Full Disk Access, etc.). A non-zero count means the scan is
+    /// incomplete even when `completed == true`.
+    var skippedDirectories: Int = 0
 }
 
 struct AppAlertInfo: Identifiable, Sendable {
     let id = UUID()
     let title: String
     let message: String
+}
+
+/// Snapshot of the current scan/sync state for the MCP scan channel.
+struct MCPScanSnapshot: Sendable {
+    let state: String   // "scanning" | "completed" | "error" | "idle"
+    let filesScanned: Int?
+    let totalSize: Int64?
+    let skipped: Int?
+    let error: String?
+}
+
+/// Latched terminal outcome of an MCP-owned scan/sync.
+struct MCPJobOutcome: Sendable {
+    let id: String
+    let state: String   // "completed" | "error" | "cancelled"
+    let filesScanned: Int?
+    let totalSize: Int64?
+    let skipped: Int?
+    let error: String?
 }
 
 enum AppActivityLevel: String, Sendable {
@@ -319,6 +342,16 @@ final class AppState: ObservableObject {
     private var monitorIssueCancellable: AnyCancellable?
     private var terminationObserver: Any?
     private var pathSweepTask: Task<Void, Never>?
+    private var scanCommandServer: ScanCommandServer?
+    private var scanJobRegistry: ScanJobRegistry?
+    /// Owner token for the next scan/sync about to be triggered. mcpTriggerScan
+    /// sets it; startScan/runIncrementalSync consume it into `mcpActiveJobID`.
+    private var pendingScanOwner: String?
+    /// The MCP job id whose scan/sync is currently running (nil for UI/automatic).
+    private(set) var mcpActiveJobID: String?
+    /// Latched terminal outcome of the most recent MCP-owned scan/sync, so
+    /// scan_job_status can answer correctly after the scan finishes.
+    private(set) var mcpLastJobOutcome: MCPJobOutcome?
 
     init() {
         self.database = Database.shared
@@ -330,6 +363,7 @@ final class AppState: ObservableObject {
             purgePseudoFilesystemPathsIfNeeded()
             scheduleCacheWarmup()
             scheduleGrowthWarmup()
+            startScanCommandServer()
         }
 
         // Save event ID synchronously on app quit — can't await in notification handlers
@@ -390,8 +424,7 @@ final class AppState: ObservableObject {
     }
 
     func checkFullDiskAccess() {
-        let testPath = NSHomeDirectory() + "/Library/Mail"
-        hasFullDiskAccess = FileManager.default.isReadableFile(atPath: testPath)
+        hasFullDiskAccess = FullDiskAccessProbe.hasFullDiskAccess()
     }
 
     func startScan(at url: URL) {
@@ -427,6 +460,11 @@ final class AppState: ObservableObject {
         invalidateCache()
         scanState = .scanning(progress: ScanProgress())
 
+        // Capture MCP ownership for this scan (nil for a UI-initiated scan).
+        let scanOwner = pendingScanOwner
+        pendingScanOwner = nil
+        mcpActiveJobID = scanOwner
+
         scanTask = Task {
             do {
                 let scanner = FileScanner(repository: fileRepository)
@@ -438,20 +476,24 @@ final class AppState: ObservableObject {
                         source: "Scan"
                     )
                     self.scanState = .error("Failed to create scan session")
+                    self.mcpFinalizeActiveJob(scanOwner, state: "error", error: "Failed to create scan session")
                     return
                 }
 
                 var scanFailure: String?
+                var skippedDirectories = 0
                 for await progress in scanner.scan(rootURL: url, sessionId: sessionId) {
                     if let errorMessage = progress.errorMessage {
                         scanFailure = errorMessage
                         break
                     }
+                    skippedDirectories = progress.skippedDirectories
                     self.scanState = .scanning(progress: progress)
                 }
 
                 if let scanFailure {
                     self.scanState = .error(scanFailure)
+                    self.mcpFinalizeActiveJob(scanOwner, state: "error", error: scanFailure)
                     presentAlert(
                         title: "Scan Failed",
                         message: "DiskSight could not finish scanning the selected folder. \(scanFailure)",
@@ -462,13 +504,28 @@ final class AppState: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                try await fileRepository.completeScanSession(id: sessionId)
+                try await fileRepository.completeScanSession(id: sessionId, skippedDirectories: skippedDirectories)
+                if skippedDirectories > 0 {
+                    self.recordActivity(
+                        level: .warning,
+                        title: "Scan Incomplete",
+                        message: "\(skippedDirectories) director\(skippedDirectories == 1 ? "y was" : "ies were") unreadable and skipped. Grant DiskSight Full Disk Access for a complete scan.",
+                        source: "Scan"
+                    )
+                }
                 // Clean up files and sessions from previous scans
                 try? await fileRepository.deleteFilesFromPreviousSessions(currentSessionId: sessionId)
                 try? await fileRepository.deleteOldSessions(keepingId: sessionId)
                 try? await fileRepository.compactIfNeeded()
                 self.lastScanSession = try fileRepository.latestCompletedScanSession()
                 self.scanState = .completed
+                self.mcpFinalizeActiveJob(
+                    scanOwner,
+                    state: "completed",
+                    filesScanned: self.lastScanSession?.fileCount,
+                    totalSize: self.lastScanSession?.totalSize,
+                    skipped: skippedDirectories
+                )
                 self.scheduleCacheWarmup()
                 self.scheduleGrowthWarmup()
 
@@ -482,6 +539,7 @@ final class AppState: ObservableObject {
                         source: "Scan"
                     )
                     self.scanState = .error(error.localizedDescription)
+                    self.mcpFinalizeActiveJob(scanOwner, state: "error", error: error.localizedDescription)
                 }
             }
         }
@@ -490,6 +548,141 @@ final class AppState: ObservableObject {
     func cancelScan() {
         scanTask?.cancel()
         scanState = .idle
+    }
+
+    // MARK: - MCP Scan Channel (app-mediated)
+
+    /// Trigger a scan on behalf of the MCP server (job-tagged via `jobID`).
+    /// Returns nil on success or an actionable error message. The app remains the
+    /// sole DB writer.
+    func mcpTriggerScan(rootPath: String, mode: String, jobID: String) -> String? {
+        guard !storageFailureActive else { return "DiskSight storage is unavailable." }
+        if case .scanning = scanState { return "A scan is already in progress." }
+        if isSyncing { return "A refresh is already in progress." }
+
+        // Resolve symlinks BEFORE validation so a symlink can't smuggle the root
+        // past the directory / managed-storage checks (and so we scan the real
+        // target). isManagedStoragePath only resolves ./.. — not symlinks.
+        let resolvedPath = URL(fileURLWithPath: rootPath).resolvingSymlinksInPath().path
+
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDir), isDir.boolValue else {
+            return "Path does not exist or is not a directory: \(rootPath)"
+        }
+        if fileRepository.isManagedStoragePath(resolvedPath) {
+            return "DiskSight can't scan its own storage folder."
+        }
+
+        let url = URL(fileURLWithPath: resolvedPath)
+        let canIncremental = (lastScanSession?.completedAt != nil) && (lastScanSession?.rootPath == resolvedPath)
+        let effectiveIncremental: Bool
+        switch mode {
+        case "full": effectiveIncremental = false
+        case "incremental": effectiveIncremental = canIncremental
+        default: effectiveIncremental = canIncremental // auto
+        }
+
+        // Tag the upcoming scan/sync as owned by this MCP job.
+        pendingScanOwner = jobID
+        scanRootPath = url
+        if effectiveIncremental {
+            if monitoringEnabled && !(fsMonitor?.running ?? false) {
+                startMonitoring(path: resolvedPath)
+            }
+            runIncrementalSync(path: resolvedPath, trigger: .manualRefresh)
+        } else {
+            startScan(at: url)
+        }
+        return nil
+    }
+
+    /// Start the Unix-socket command listener that lets the standalone MCP
+    /// server start/cancel scans and probe access. The app is the sole writer.
+    private func startScanCommandServer() {
+        let registry = ScanJobRegistry(appState: self)
+        let socketURL = database.storageDirectoryURL.appendingPathComponent("mcp.sock")
+        let server = ScanCommandServer(socketURL: socketURL, registry: registry)
+        self.scanJobRegistry = registry
+        self.scanCommandServer = server
+        server.start()
+    }
+
+    /// Cancel whatever scan/sync is currently running (full or incremental).
+    func mcpCancelActiveScan() {
+        if let id = mcpActiveJobID {
+            mcpLastJobOutcome = MCPJobOutcome(id: id, state: "cancelled", filesScanned: nil, totalSize: nil, skipped: nil, error: nil)
+            mcpActiveJobID = nil
+        }
+        scanTask?.cancel()
+        incrementalSyncTask?.cancel()
+        if case .scanning = scanState { scanState = .idle }
+        isSyncing = false
+    }
+
+    /// Latch a terminal outcome for the MCP job `jobID`, but only if it is still
+    /// the active job (a superseded task must not clobber a newer job's state).
+    /// No-op for UI/automatic scans (jobID == nil).
+    func mcpFinalizeActiveJob(
+        _ jobID: String?,
+        state: String,
+        filesScanned: Int? = nil,
+        totalSize: Int64? = nil,
+        skipped: Int? = nil,
+        error: String? = nil
+    ) {
+        guard let jobID, jobID == mcpActiveJobID else { return }
+        mcpLastJobOutcome = MCPJobOutcome(
+            id: jobID,
+            state: state,
+            filesScanned: filesScanned,
+            totalSize: totalSize,
+            skipped: skipped,
+            error: error
+        )
+        mcpActiveJobID = nil
+    }
+
+    /// A "completed"-style snapshot derived from the last completed session, used
+    /// as a fallback when the in-memory job registry has no record (e.g. after an
+    /// app relaunch between start_scan and a poll).
+    func mcpLatestSessionSnapshot() -> MCPScanSnapshot? {
+        guard let session = lastScanSession, session.completedAt != nil else { return nil }
+        return MCPScanSnapshot(
+            state: "completed",
+            filesScanned: session.fileCount,
+            totalSize: session.totalSize,
+            skipped: session.skippedDirectories,
+            error: nil
+        )
+    }
+
+    /// Current scan/sync snapshot for MCP `scan_status`.
+    func mcpScanSnapshot() -> MCPScanSnapshot {
+        if isSyncing {
+            return MCPScanSnapshot(state: "scanning", filesScanned: nil, totalSize: nil, skipped: nil, error: nil)
+        }
+        switch scanState {
+        case .idle:
+            return MCPScanSnapshot(state: "idle", filesScanned: nil, totalSize: nil, skipped: nil, error: nil)
+        case .scanning(let progress):
+            return MCPScanSnapshot(
+                state: "scanning",
+                filesScanned: progress.filesScanned,
+                totalSize: progress.totalSize,
+                skipped: progress.skippedDirectories,
+                error: nil
+            )
+        case .completed:
+            return MCPScanSnapshot(
+                state: "completed",
+                filesScanned: lastScanSession?.fileCount,
+                totalSize: lastScanSession?.totalSize,
+                skipped: lastScanSession?.skippedDirectories,
+                error: nil
+            )
+        case .error(let message):
+            return MCPScanSnapshot(state: "error", filesScanned: nil, totalSize: nil, skipped: nil, error: message)
+        }
     }
 
     var canRefreshMetrics: Bool {
@@ -678,8 +871,16 @@ final class AppState: ObservableObject {
     ///   When false (default), uses fast quickSync with mtime pruning.
     private func runIncrementalSync(path: String, fullWalk: Bool = false, trigger: SyncTrigger) {
         incrementalSyncTask?.cancel()
-        guard let session = lastScanSession, let sessionId = session.id else { return }
+        guard let session = lastScanSession, let sessionId = session.id else {
+            pendingScanOwner = nil
+            return
+        }
         isSyncing = true
+
+        // Capture MCP ownership for this sync (nil for a UI/automatic sync).
+        let syncOwner = pendingScanOwner
+        pendingScanOwner = nil
+        mcpActiveJobID = syncOwner
 
         incrementalSyncTask = Task(priority: .low) {
             let scanner = FileScanner(repository: fileRepository)
@@ -720,13 +921,15 @@ final class AppState: ObservableObject {
                             source: trigger.source
                         )
                     }
+                    self.mcpFinalizeActiveJob(syncOwner, state: "error", error: failureMessage)
                 }
                 self.isSyncing = false
                 return
             }
 
+            let syncedSkippedDirectories = lastProgress?.skippedDirectories ?? 0
             do {
-                try await fileRepository.updateSessionStats(id: sessionId)
+                try await fileRepository.updateSessionStats(id: sessionId, skippedDirectories: syncedSkippedDirectories)
             } catch {
                 let message = "DiskSight refreshed files, but could not update session stats. \(error.localizedDescription)"
                 if trigger.shouldAlertOnFailure {
@@ -744,6 +947,7 @@ final class AppState: ObservableObject {
                         source: trigger.source
                     )
                 }
+                self.mcpFinalizeActiveJob(syncOwner, state: "error", error: message)
                 self.isSyncing = false
                 return
             }
@@ -767,6 +971,7 @@ final class AppState: ObservableObject {
                         source: trigger.source
                     )
                 }
+                self.mcpFinalizeActiveJob(syncOwner, state: "error", error: message)
                 self.isSyncing = false
                 return
             }
@@ -775,6 +980,13 @@ final class AppState: ObservableObject {
             self.dataVersion += 1
             await self.refreshVisualizationData()
             self.scheduleAutoGrowthRefresh()
+            self.mcpFinalizeActiveJob(
+                syncOwner,
+                state: "completed",
+                filesScanned: self.lastScanSession?.fileCount,
+                totalSize: self.lastScanSession?.totalSize,
+                skipped: syncedSkippedDirectories
+            )
             self.isSyncing = false
             self.schedulePathSweepIfNeeded()
         }
